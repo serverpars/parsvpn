@@ -38,7 +38,7 @@ func (m model) updateEditMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeBrowse
 		m.editProfile = ""
 		m.err = ""
-		return m, nil
+		return m, refreshStatus
 	case "ctrl+c":
 		return m, tea.Quit
 	case "r":
@@ -273,28 +273,35 @@ func (m model) updateEditDNS(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func saveAndReload(p *profile.Profile) error {
+func saveAndReload(p *profile.Profile) (applied bool, err error) {
 	if err := profile.Save(p); err != nil {
-		return fmt.Errorf("save: %w (try running as root)", err)
+		return false, fmt.Errorf("save: %w (try running as root)", err)
 	}
 	resp, err := ipc.Call(ipc.Request{Cmd: "status"})
 	if err != nil || resp.Status == nil || !resp.Status.Active || resp.Status.Profile != p.Name {
-		return nil
+		return false, nil
 	}
 	reload, err := ipc.Call(ipc.Request{Cmd: "reload"})
 	if err != nil {
-		return fmt.Errorf("saved, but reload failed: %w", err)
+		return false, fmt.Errorf("saved, but reload failed: %w", err)
 	}
 	if !reload.OK {
-		return fmt.Errorf("saved, but reload failed: %s", reload.Error)
+		return false, fmt.Errorf("saved, but reload failed: %s", reload.Error)
 	}
-	return nil
+	return true, nil
+}
+
+func applyNote(applied bool) string {
+	if applied {
+		return " — applied to active tunnel"
+	}
+	return " — saved (connect to apply)"
 }
 
 type editDoneMsg struct {
 	err     error
 	message string
-	reopen  string // "routes" | "hosts" | "split" | ""
+	reopen  string // "routes" | "hosts" | "split" | "dns" | ""
 }
 
 func editAddRoute(profileName, cidr string) tea.Cmd {
@@ -306,10 +313,11 @@ func editAddRoute(profileName, cidr string) tea.Cmd {
 		if err := p.AddRoutes(cidr); err != nil {
 			return editDoneMsg{err: err, reopen: "routes"}
 		}
-		if err := saveAndReload(p); err != nil {
+		applied, err := saveAndReload(p)
+		if err != nil {
 			return editDoneMsg{err: err, reopen: "routes"}
 		}
-		return editDoneMsg{message: "added " + cidr, reopen: "routes"}
+		return editDoneMsg{message: "added " + cidr + applyNote(applied), reopen: "routes"}
 	}
 }
 
@@ -322,10 +330,11 @@ func editRemoveRoute(profileName, cidr string) tea.Cmd {
 		if err := p.RemoveRoutes(cidr); err != nil {
 			return editDoneMsg{err: err, reopen: "routes"}
 		}
-		if err := saveAndReload(p); err != nil {
+		applied, err := saveAndReload(p)
+		if err != nil {
 			return editDoneMsg{err: err, reopen: "routes"}
 		}
-		return editDoneMsg{message: "removed " + cidr, reopen: "routes"}
+		return editDoneMsg{message: "removed " + cidr + applyNote(applied), reopen: "routes"}
 	}
 }
 
@@ -357,13 +366,19 @@ func editSetMode(profileName, mode string) tea.Cmd {
 		if err != nil {
 			return editDoneMsg{err: err, reopen: "split"}
 		}
+		clearedPreset := mode == profile.SplitModeInclude && p.SplitTunnel.BypassPreset != ""
 		if err := p.SetSplitMode(mode); err != nil {
 			return editDoneMsg{err: err, reopen: "split"}
 		}
-		if err := saveAndReload(p); err != nil {
+		applied, err := saveAndReload(p)
+		if err != nil {
 			return editDoneMsg{err: err, reopen: "split"}
 		}
-		return editDoneMsg{message: "mode=" + mode, reopen: "split"}
+		msg := "mode=" + mode
+		if clearedPreset {
+			msg += " (cleared Iran preset)"
+		}
+		return editDoneMsg{message: msg + applyNote(applied), reopen: "split"}
 	}
 }
 
@@ -376,14 +391,15 @@ func editSetPreset(profileName, preset string) tea.Cmd {
 		if err := p.SetBypassPreset(preset); err != nil {
 			return editDoneMsg{err: err, reopen: "split"}
 		}
-		if err := saveAndReload(p); err != nil {
+		applied, err := saveAndReload(p)
+		if err != nil {
 			return editDoneMsg{err: err, reopen: "split"}
 		}
 		msg := "preset=none"
 		if p.SplitTunnel.BypassPreset != "" {
-			msg = fmt.Sprintf("mode=exclude preset=%s (Iran bypass active after reload)", p.SplitTunnel.BypassPreset)
+			msg = fmt.Sprintf("mode=exclude preset=%s", p.SplitTunnel.BypassPreset)
 		}
-		return editDoneMsg{message: msg, reopen: "split"}
+		return editDoneMsg{message: msg + applyNote(applied), reopen: "split"}
 	}
 }
 
@@ -394,14 +410,15 @@ func editSetDNSOverride(profileName string, on bool) tea.Cmd {
 			return editDoneMsg{err: err, reopen: "dns"}
 		}
 		p.SetOverrideSystemDNS(on)
-		if err := saveAndReload(p); err != nil {
+		applied, err := saveAndReload(p)
+		if err != nil {
 			return editDoneMsg{err: err, reopen: "dns"}
 		}
 		state := "off"
 		if on {
 			state = "on"
 		}
-		return editDoneMsg{message: "dns override=" + state, reopen: "dns"}
+		return editDoneMsg{message: "dns override=" + state + applyNote(applied), reopen: "dns"}
 	}
 }
 
@@ -415,11 +432,12 @@ func editSetDNSServers(profileName string, servers ...string) tea.Cmd {
 			return editDoneMsg{err: err, reopen: "dns"}
 		}
 		p.SetOverrideSystemDNS(true)
-		if err := saveAndReload(p); err != nil {
+		applied, err := saveAndReload(p)
+		if err != nil {
 			return editDoneMsg{err: err, reopen: "dns"}
 		}
 		return editDoneMsg{
-			message: fmt.Sprintf("dns override=on servers=%s", strings.Join(p.DNS, ",")),
+			message: fmt.Sprintf("dns override=on servers=%s%s", strings.Join(p.DNS, ","), applyNote(applied)),
 			reopen:  "dns",
 		}
 	}
@@ -434,11 +452,12 @@ func editClearDNSServers(profileName string) tea.Cmd {
 		if err := p.SetDNSServers(); err != nil {
 			return editDoneMsg{err: err, reopen: "dns"}
 		}
-		if err := saveAndReload(p); err != nil {
+		applied, err := saveAndReload(p)
+		if err != nil {
 			return editDoneMsg{err: err, reopen: "dns"}
 		}
 		return editDoneMsg{
-			message: fmt.Sprintf("dns servers cleared (default %s)", p.UpstreamDNSHost()),
+			message: fmt.Sprintf("dns servers cleared (default %s)%s", p.UpstreamDNSHost(), applyNote(applied)),
 			reopen:  "dns",
 		}
 	}
@@ -535,12 +554,14 @@ func (m model) viewEditSplit() string {
 	}
 	body := fmt.Sprintf(`Current: mode=%s  preset=%s
 
-  [i]  Include — only listed routes via tunnel
+Press a key to apply immediately (saved + reloads active tunnel):
+
+  [i]  Include — only listed routes via tunnel (clears country preset)
   [x]  Exclude — tunnel everything except bypass
   [p]  Iran preset (sets mode=exclude + bypass Iranian IPs)
   [n]  Clear preset (none)
 
-Note: preset only works in exclude mode (choosing [p] enables exclude).
+Note: Iran preset requires exclude mode. Choosing [i] clears the preset.
 `, mode, preset)
 	var errLine string
 	if m.err != "" {

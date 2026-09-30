@@ -237,6 +237,34 @@ func TestAddRemoveRoutesAndHosts(t *testing.T) {
 	}
 }
 
+func TestSetSplitModeIncludeClearsPreset(t *testing.T) {
+	p := &Profile{
+		Name:       "r",
+		PrivateKey: "k",
+		Address:    "10.0.0.2/32",
+		Peers:      []Peer{{PublicKey: "p", AllowedIPs: []string{"0.0.0.0/0"}}},
+		SplitTunnel: SplitTunnel{
+			Mode:         SplitModeExclude,
+			BypassPreset: "ir",
+		},
+	}
+	if err := p.SetSplitMode(SplitModeInclude); err != nil {
+		t.Fatal(err)
+	}
+	if p.EffectiveMode() != SplitModeInclude {
+		t.Fatalf("mode: %s", p.EffectiveMode())
+	}
+	if p.SplitTunnel.BypassPreset != "" {
+		t.Fatalf("preset should be cleared, got %q", p.SplitTunnel.BypassPreset)
+	}
+	if err := p.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if p.EffectiveMode() != SplitModeInclude {
+		t.Fatalf("Normalize should keep include after clearing preset, got %s", p.EffectiveMode())
+	}
+}
+
 func TestValidateName(t *testing.T) {
 	if err := ValidateName("../etc"); err == nil {
 		t.Fatal("expected error")

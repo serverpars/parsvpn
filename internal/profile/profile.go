@@ -436,12 +436,17 @@ func (p *Profile) RemoveHostOverride(domain string) error {
 }
 
 // SetSplitMode sets include|exclude.
+// Switching to include clears bypass_preset (presets only apply in exclude mode);
+// otherwise Save→Normalize would silently force exclude again.
 func (p *Profile) SetSplitMode(mode string) error {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode != SplitModeInclude && mode != SplitModeExclude {
 		return fmt.Errorf("invalid mode %q (use include|exclude)", mode)
 	}
 	p.SplitTunnel.Mode = mode
+	if mode == SplitModeInclude && p.SplitTunnel.BypassPreset != "" {
+		p.SplitTunnel.BypassPreset = ""
+	}
 	return nil
 }
 
