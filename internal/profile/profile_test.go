@@ -68,3 +68,26 @@ func TestValidateName(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestImportFileJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "office.json")
+	content := `{
+  "private_key": "k",
+  "address": "10.200.0.2/32",
+  "peers": [{"public_key": "p", "allowed_ips": ["10.10.0.0/16"]}]
+}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := ImportFile(path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name != "office" {
+		t.Fatalf("name: %s", p.Name)
+	}
+	if len(p.SplitTunnel.IPRanges) != 1 {
+		t.Fatalf("split: %#v", p.SplitTunnel.IPRanges)
+	}
+}

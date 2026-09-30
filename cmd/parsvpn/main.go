@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/serverpars/parsvpn/internal/constants"
@@ -137,30 +136,9 @@ func cmdProfile() *cobra.Command {
 			if file == "" {
 				return fmt.Errorf("--file is required")
 			}
-			if name == "" {
-				base := filepath.Base(file)
-				name = strings.TrimSuffix(base, filepath.Ext(base))
-			}
-			var p *profile.Profile
-			var err error
-			switch strings.ToLower(filepath.Ext(file)) {
-			case ".json":
-				data, err := os.ReadFile(file)
-				if err != nil {
-					return err
-				}
-				p = &profile.Profile{}
-				if err := json.Unmarshal(data, p); err != nil {
-					return err
-				}
-				if p.Name == "" {
-					p.Name = name
-				}
-			default:
-				p, err = profile.ImportWireGuardConf(file, name)
-				if err != nil {
-					return err
-				}
+			p, err := profile.ImportFile(file, name)
+			if err != nil {
+				return err
 			}
 			if err := profile.Save(p); err != nil {
 				return err

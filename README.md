@@ -38,8 +38,8 @@ sudo parsvpn up office
 parsvpn status --json
 sudo parsvpn down
 
-# Interactive dashboard
-parsvpn
+# Interactive dashboard (press [a] to add a profile)
+sudo parsvpn
 ```
 
 Daemon (started by systemd):

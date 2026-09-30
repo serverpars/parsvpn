@@ -2,10 +2,15 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/filepicker"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/serverpars/parsvpn/internal/constants"
@@ -19,6 +24,16 @@ var (
 	statusOff   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	helpStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	detailStyle = lipgloss.NewStyle().PaddingLeft(2)
+	promptStyle = lipgloss.NewStyle().Bold(true)
+)
+
+type mode int
+
+const (
+	modeBrowse mode = iota
+	modeAddFile
+	modeAddName
+	modeConfirmDelete
 )
 
 type item struct {
@@ -36,11 +51,17 @@ func (i item) Description() string { return "" }
 func (i item) FilterValue() string { return i.name }
 
 type model struct {
-	list   list.Model
-	status ipc.StatusPayload
-	err    string
-	width  int
-	height int
+	mode       mode
+	list       list.Model
+	status     ipc.StatusPayload
+	err        string
+	notice     string
+	width      int
+	height     int
+	picker     filepicker.Model
+	nameInput  textinput.Model
+	addPath    string
+	deleteName string
 }
 
 type tickMsg struct{}
@@ -50,12 +71,28 @@ type statusMsg struct {
 	err error
 }
 
+type profilesMsg struct {
+	names []string
+	err   error
+}
+
+type opDoneMsg struct {
+	err     error
+	message string
+}
+
 func Run() error {
 	names, err := profile.List()
 	if err != nil {
 		return err
 	}
 	st, _ := fetchStatus()
+	m := newModel(names, st)
+	_, err = tea.NewProgram(m, tea.WithAltScreen()).Run()
+	return err
+}
+
+func newModel(names []string, st ipc.StatusPayload) model {
 	items := make([]list.Item, 0, len(names))
 	for _, n := range names {
 		items = append(items, item{name: n, active: st.Active && st.Profile == n})
@@ -66,9 +103,31 @@ func Run() error {
 	l.Title = "Profiles"
 	l.SetShowHelp(false)
 	l.SetShowStatusBar(false)
-	m := model{list: l, status: st}
-	_, err = tea.NewProgram(m, tea.WithAltScreen()).Run()
-	return err
+
+	fp := filepicker.New()
+	fp.AllowedTypes = []string{".conf", ".json", ".wg"}
+	fp.ShowHidden = false
+	fp.DirAllowed = false
+	fp.FileAllowed = true
+	fp.AutoHeight = false
+	fp.Height = 12
+	if cwd, err := os.Getwd(); err == nil {
+		fp.CurrentDirectory = cwd
+	} else if home, err := os.UserHomeDir(); err == nil {
+		fp.CurrentDirectory = home
+	}
+	// Keep esc for canceling the add flow; use h/backspace/left to go up.
+	fp.KeyMap.Back = key.NewBinding(
+		key.WithKeys("h", "backspace", "left"),
+		key.WithHelp("h", "back"),
+	)
+
+	ti := textinput.New()
+	ti.Placeholder = "profile-name"
+	ti.CharLimit = 64
+	ti.Width = 32
+
+	return model{list: l, status: st, picker: fp, nameInput: ti}
 }
 
 func (m model) Init() tea.Cmd {
@@ -84,6 +143,11 @@ func scheduleTick() tea.Cmd {
 func refreshStatus() tea.Msg {
 	st, err := fetchStatus()
 	return statusMsg{st: st, err: err}
+}
+
+func refreshProfiles() tea.Msg {
+	names, err := profile.List()
+	return profilesMsg{names: names, err: err}
 }
 
 func fetchStatus() (ipc.StatusPayload, error) {
@@ -102,9 +166,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.list.SetSize(max(20, msg.Width/2-2), max(5, msg.Height-8))
+		listH := max(5, msg.Height-8)
+		m.list.SetSize(max(20, msg.Width/2-2), listH)
+		m.picker.SetHeight(max(8, msg.Height-10))
 	case tickMsg:
-		return m, tea.Batch(refreshStatus, scheduleTick())
+		if m.mode == modeBrowse {
+			return m, tea.Batch(refreshStatus, scheduleTick())
+		}
+		return m, scheduleTick()
 	case statusMsg:
 		if msg.err != nil {
 			m.err = msg.err.Error()
@@ -113,23 +182,187 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = msg.st
 			m.syncActiveFlags()
 		}
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
-			return m, tea.Quit
-		case " ":
-			it, ok := m.list.SelectedItem().(item)
-			if !ok {
-				return m, nil
-			}
-			return m, toggleProfile(it.name, m.status.Active && m.status.Profile == it.name)
-		case "r":
-			return m, refreshStatus
+	case profilesMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+		} else {
+			m.setProfiles(msg.names)
 		}
+	case opDoneMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			m.notice = ""
+		} else {
+			m.err = ""
+			m.notice = msg.message
+		}
+		m.mode = modeBrowse
+		m.addPath = ""
+		m.deleteName = ""
+		m.nameInput.Blur()
+		return m, tea.Batch(refreshProfiles, refreshStatus)
+	case tea.KeyMsg:
+		switch m.mode {
+		case modeAddFile:
+			return m.updateAddFile(msg)
+		case modeAddName:
+			return m.updateAddName(msg)
+		case modeConfirmDelete:
+			return m.updateConfirmDelete(msg)
+		default:
+			return m.updateBrowse(msg)
+		}
+	}
+
+	switch m.mode {
+	case modeAddFile:
+		var cmd tea.Cmd
+		m.picker, cmd = m.picker.Update(msg)
+		if didSelect, path := m.picker.DidSelectFile(msg); didSelect {
+			return m.beginNameInput(path)
+		}
+		return m, cmd
+	case modeAddName:
+		var cmd tea.Cmd
+		m.nameInput, cmd = m.nameInput.Update(msg)
+		return m, cmd
+	default:
+		var cmd tea.Cmd
+		m.list, cmd = m.list.Update(msg)
+		return m, cmd
+	}
+}
+
+func (m model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case " ":
+		it, ok := m.list.SelectedItem().(item)
+		if !ok {
+			return m, nil
+		}
+		m.notice = ""
+		return m, toggleProfile(it.name, m.status.Active && m.status.Profile == it.name)
+	case "r":
+		m.notice = ""
+		return m, tea.Batch(refreshStatus, refreshProfiles)
+	case "a":
+		m.mode = modeAddFile
+		m.err = ""
+		m.notice = ""
+		m.addPath = ""
+		return m, m.picker.Init()
+	case "d":
+		it, ok := m.list.SelectedItem().(item)
+		if !ok {
+			m.err = "no profile selected"
+			return m, nil
+		}
+		if m.status.Active && m.status.Profile == it.name {
+			m.err = "disconnect profile before deleting"
+			return m, nil
+		}
+		m.mode = modeConfirmDelete
+		m.deleteName = it.name
+		m.err = ""
+		m.notice = ""
+		return m, nil
 	}
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
 	return m, cmd
+}
+
+func (m model) updateAddFile(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.mode = modeBrowse
+		m.err = ""
+		return m, nil
+	case "q":
+		// Don't quit the whole app while adding; cancel instead.
+		m.mode = modeBrowse
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.picker, cmd = m.picker.Update(msg)
+	if didSelect, path := m.picker.DidSelectFile(msg); didSelect {
+		return m.beginNameInput(path)
+	}
+	if didSelect, path := m.picker.DidSelectDisabledFile(msg); didSelect {
+		m.err = path + " is not a .conf or .json profile"
+		return m, cmd
+	}
+	return m, cmd
+}
+
+func (m model) beginNameInput(path string) (tea.Model, tea.Cmd) {
+	m.addPath = path
+	m.mode = modeAddName
+	stem := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	m.nameInput.SetValue(stem)
+	m.nameInput.CursorEnd()
+	cmd := m.nameInput.Focus()
+	m.err = ""
+	return m, cmd
+}
+
+func (m model) updateAddName(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = modeAddFile
+		m.nameInput.Blur()
+		m.err = ""
+		return m, nil
+	case "ctrl+c":
+		m.mode = modeBrowse
+		m.nameInput.Blur()
+		return m, nil
+	case "enter":
+		name := strings.TrimSpace(m.nameInput.Value())
+		path := m.addPath
+		m.nameInput.Blur()
+		return m, saveProfile(path, name)
+	}
+	var cmd tea.Cmd
+	m.nameInput, cmd = m.nameInput.Update(msg)
+	return m, cmd
+}
+
+func (m model) updateConfirmDelete(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		name := m.deleteName
+		return m, deleteProfile(name)
+	case "n", "N", "esc", "q":
+		m.mode = modeBrowse
+		m.deleteName = ""
+		return m, nil
+	}
+	return m, nil
+}
+
+func saveProfile(path, name string) tea.Cmd {
+	return func() tea.Msg {
+		p, err := profile.ImportFile(path, name)
+		if err != nil {
+			return opDoneMsg{err: err}
+		}
+		if err := profile.Save(p); err != nil {
+			return opDoneMsg{err: fmt.Errorf("save profile: %w (try running as root)", err)}
+		}
+		return opDoneMsg{message: fmt.Sprintf("saved profile %q", p.Name)}
+	}
+}
+
+func deleteProfile(name string) tea.Cmd {
+	return func() tea.Msg {
+		if err := profile.Delete(name); err != nil {
+			return opDoneMsg{err: fmt.Errorf("delete profile: %w (try running as root)", err)}
+		}
+		return opDoneMsg{message: fmt.Sprintf("deleted profile %q", name)}
+	}
 }
 
 func toggleProfile(name string, isActive bool) tea.Cmd {
@@ -165,7 +398,28 @@ func (m *model) syncActiveFlags() {
 	m.list.SetItems(items)
 }
 
+func (m *model) setProfiles(names []string) {
+	items := make([]list.Item, 0, len(names))
+	for _, n := range names {
+		items = append(items, item{name: n, active: m.status.Active && m.status.Profile == n})
+	}
+	m.list.SetItems(items)
+}
+
 func (m model) View() string {
+	switch m.mode {
+	case modeAddFile:
+		return m.viewAddFile()
+	case modeAddName:
+		return m.viewAddName()
+	case modeConfirmDelete:
+		return m.viewConfirmDelete()
+	default:
+		return m.viewBrowse()
+	}
+}
+
+func (m model) viewBrowse() string {
 	statusLine := statusOff.Render("[STATUS: INACTIVE]")
 	if m.status.Active {
 		statusLine = statusOn.Render(fmt.Sprintf("[STATUS: ACTIVE -> %s]", m.status.Interface))
@@ -186,15 +440,52 @@ func (m model) View() string {
 				detail.WriteString("  " + o + "\n")
 			}
 		}
+	} else if len(m.list.Items()) == 0 {
+		detail.WriteString("No profiles yet.\nPress [a] to import a WireGuard .conf or JSON profile.\n")
 	} else {
 		detail.WriteString("No active tunnel.\nSelect a profile and press Space to connect.\n")
+	}
+	if m.notice != "" {
+		detail.WriteString("\n" + m.notice + "\n")
 	}
 	if m.err != "" {
 		detail.WriteString("\nError: " + m.err + "\n")
 	}
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, m.list.View(), detailStyle.Render(detail.String()))
-	help := helpStyle.Render("[Space] Toggle  [r] Refresh  [q] Quit")
+	help := helpStyle.Render("[Space] Toggle  [a] Add  [d] Delete  [r] Refresh  [q] Quit")
+	return header + "\n\n" + body + "\n\n" + help
+}
+
+func (m model) viewAddFile() string {
+	header := titleStyle.Render("Add profile") + " — select a WireGuard .conf or .json file"
+	var errLine string
+	if m.err != "" {
+		errLine = "\n" + m.err + "\n"
+	}
+	help := helpStyle.Render("[enter] Select  [h] Up dir  [esc] Cancel")
+	return header + "\n\n" + m.picker.View() + errLine + "\n" + help
+}
+
+func (m model) viewAddName() string {
+	header := titleStyle.Render("Add profile")
+	body := fmt.Sprintf("File: %s\n\n%s\n%s",
+		m.addPath,
+		promptStyle.Render("Profile name:"),
+		m.nameInput.View(),
+	)
+	var errLine string
+	if m.err != "" {
+		errLine = "\n" + m.err + "\n"
+	}
+	help := helpStyle.Render("[enter] Save  [esc] Back  [ctrl+c] Cancel")
+	return header + "\n\n" + body + errLine + "\n\n" + help
+}
+
+func (m model) viewConfirmDelete() string {
+	header := titleStyle.Render("Delete profile")
+	body := fmt.Sprintf("Delete profile %q?\nThis cannot be undone.", m.deleteName)
+	help := helpStyle.Render("[y] Yes  [n] No")
 	return header + "\n\n" + body + "\n\n" + help
 }
 
