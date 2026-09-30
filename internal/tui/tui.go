@@ -50,6 +50,11 @@ const (
 	modeTraffic
 	modeSettings
 	modeSettingsEditInterval
+	modePresets
+	modePresetEntries
+	modePresetNew
+	modePresetAddEntry
+	modePresetConfirmDelete
 )
 
 type addSource int
@@ -96,6 +101,7 @@ type model struct {
 	editList      list.Model
 	hostAlsoWWW   bool
 	trafficLines  []string
+	presetName    string
 }
 
 type tickMsg struct{}
@@ -328,13 +334,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			next, cmd = m.openEditHosts()
 			m = next.(model)
 		case "split":
-			m.mode = modeEditSplit
+			next, cmd = m.openEditSplit()
+			m = next.(model)
 		case "dns":
 			m.mode = modeEditDNS
 		default:
 			m.mode = modeEditMenu
 		}
 		return m, tea.Batch(cmd, refreshStatus)
+	case presetDoneMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			m.notice = ""
+		} else {
+			m.err = ""
+			m.notice = msg.message
+		}
+		m.nameInput.Blur()
+		m.nameInput.Placeholder = "profile-name"
+		switch msg.reopen {
+		case "entries":
+			name := msg.name
+			if name == "" {
+				name = m.presetName
+			}
+			next, cmd := m.openPresetEntries(name)
+			m = next.(model)
+			return m, cmd
+		case "list":
+			m.mode = modePresets
+			m.presetName = ""
+			m.refreshPresetsList()
+			return m, nil
+		default:
+			m.mode = modeBrowse
+			return m, refreshStatus
+		}
 	case settingsDoneMsg:
 		if msg.err != nil {
 			m.err = msg.err.Error()
@@ -402,6 +437,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateSettings(msg)
 		case modeSettingsEditInterval:
 			return m.updateSettingsEditInterval(msg)
+		case modePresets:
+			return m.updatePresets(msg)
+		case modePresetEntries:
+			return m.updatePresetEntries(msg)
+		case modePresetNew:
+			return m.updatePresetNew(msg)
+		case modePresetAddEntry:
+			return m.updatePresetAddEntry(msg)
+		case modePresetConfirmDelete:
+			return m.updatePresetConfirmDelete(msg)
 		default:
 			return m.updateBrowse(msg)
 		}
@@ -419,7 +464,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.pasteArea, cmd = m.pasteArea.Update(msg)
 		return m, cmd
-	case modeAddName, modeEditRouteAdd, modeEditHostAdd, modeSettingsEditInterval:
+	case modeAddName, modeEditRouteAdd, modeEditHostAdd, modeSettingsEditInterval, modePresetNew, modePresetAddEntry:
 		var cmd tea.Cmd
 		m.nameInput, cmd = m.nameInput.Update(msg)
 		return m, cmd
@@ -430,7 +475,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m, nil
-	case modeEditRoutes, modeEditHosts, modeSettings:
+	case modeEditRoutes, modeEditHosts, modeSettings, modeEditSplit, modePresets, modePresetEntries:
 		var cmd tea.Cmd
 		m.editList, cmd = m.editList.Update(msg)
 		return m, cmd
@@ -490,6 +535,9 @@ func (m model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return next, cmd
 	case "s":
 		next, cmd := m.openSettings()
+		return next, cmd
+	case "p":
+		next, cmd := m.openPresets()
 		return next, cmd
 	case "t":
 		m.mode = modeTraffic
@@ -754,6 +802,16 @@ func (m model) View() string {
 		return m.viewSettings()
 	case modeSettingsEditInterval:
 		return m.viewSettingsEditInterval()
+	case modePresets:
+		return m.viewPresets()
+	case modePresetEntries:
+		return m.viewPresetEntries()
+	case modePresetNew:
+		return m.viewPresetNew()
+	case modePresetAddEntry:
+		return m.viewPresetAddEntry()
+	case modePresetConfirmDelete:
+		return m.viewPresetConfirmDelete()
 	default:
 		return m.viewBrowse()
 	}
@@ -842,6 +900,11 @@ func (m model) viewBrowse() string {
 	header := titleStyle.Render(fmt.Sprintf("parsvpn %s", constants.Version)) + "   " + statusLine
 
 	var detail strings.Builder
+	sel := ""
+	if it, ok := m.list.SelectedItem().(item); ok {
+		sel = it.name
+	}
+
 	if m.status.Healing {
 		prof := m.status.Profile
 		if prof == "" {
@@ -851,51 +914,46 @@ func (m model) viewBrowse() string {
 		detail.WriteString("Interface was lost; reconnecting — wait a moment.\n")
 		detail.WriteString("----------------------------------------------\n")
 	} else if m.status.Active {
+		detail.WriteString(fmt.Sprintf("Active:    %s\n", m.status.Profile))
 		detail.WriteString(fmt.Sprintf("Endpoint:  %s\n", m.status.Endpoint))
 		detail.WriteString(fmt.Sprintf("Local IP:  %s\n", m.status.Address))
 		detail.WriteString(fmt.Sprintf("Handshake: %s\n", m.status.Handshake))
 		detail.WriteString(fmt.Sprintf("Transfer:  %s RX / %s TX\n", humanBytes(m.status.RxBytes), humanBytes(m.status.TxBytes)))
 		detail.WriteString("----------------------------------------------\n")
-		if len(m.status.SplitIPs) > 0 {
-			detail.WriteString("Split: " + m.status.SplitIPs[0] + "\n")
-			if len(m.status.SplitIPs) > 1 {
-				detail.WriteString("  " + strings.Join(m.status.SplitIPs[1:], "\n  ") + "\n")
-			}
-		}
-		dnsState := "off"
-		if m.status.DNSOverride {
-			dnsState = "on"
-		}
-		servers := "-"
-		if len(m.status.DNSServers) > 0 {
-			servers = strings.Join(m.status.DNSServers, ",")
-		}
-		detail.WriteString(fmt.Sprintf("DNS: override=%s servers=%s\n", dnsState, servers))
-		auto := "off"
-		if m.status.AutoConnect {
-			auto = "on"
-		}
-		wanted := m.status.AutostartProfile
-		if wanted == "" {
-			wanted = "-"
-		}
-		detail.WriteString(fmt.Sprintf("Autostart: %s (reconnects as %s)\n", auto, wanted))
-		au := "off"
-		if m.status.AutoUpdate {
-			au = "on"
-		}
-		detail.WriteString(fmt.Sprintf("Autoupdate: %s\n", au))
-		if len(m.status.Overrides) > 0 {
-			detail.WriteString("Host Overrides:\n")
-			for _, o := range m.status.Overrides {
-				detail.WriteString("  " + o + "\n")
-			}
-		}
 	} else if len(m.list.Items()) == 0 {
 		detail.WriteString("No profiles yet.\nPress [a] to add a profile (file, paste, or empty tunnel).\n")
-	} else {
-		detail.WriteString("No active tunnel.\nSelect a profile and press Space to connect.\nPress [e] to edit routes / hosts / split mode.\n")
+	} else if sel == "" {
+		detail.WriteString("Select a profile.\nPress Space to connect, [e] to edit, [p] for presets.\n")
 	}
+
+	// Always show selected profile config from disk so edits (hosts/routes/DNS)
+	// appear immediately on return to the main menu — not only from stale status.
+	if sel != "" {
+		if m.status.Active && m.status.Profile != sel {
+			detail.WriteString(fmt.Sprintf("Selected:  %s (not connected)\n", sel))
+			detail.WriteString("----------------------------------------------\n")
+		} else if !m.status.Active && !m.status.Healing {
+			detail.WriteString(fmt.Sprintf("Selected:  %s\n", sel))
+			detail.WriteString("----------------------------------------------\n")
+		}
+		writeProfileDiskDetail(&detail, sel)
+	}
+
+	auto := "off"
+	if m.status.AutoConnect {
+		auto = "on"
+	}
+	wanted := m.status.AutostartProfile
+	if wanted == "" {
+		wanted = "-"
+	}
+	au := "off"
+	if m.status.AutoUpdate {
+		au = "on"
+	}
+	detail.WriteString(fmt.Sprintf("Autostart: %s (reconnects as %s)\n", auto, wanted))
+	detail.WriteString(fmt.Sprintf("Autoupdate: %s\n", au))
+
 	if m.updateVersion != "" {
 		detail.WriteString(fmt.Sprintf("\nUpdate available: %s (press [u] to install)\n",
 			update.FormatVersion(m.updateVersion)))
@@ -908,8 +966,55 @@ func (m model) viewBrowse() string {
 	}
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, m.list.View(), detailStyle.Render(detail.String()))
-	help := helpStyle.Render("[Space] Toggle  [a] Add  [e] Edit  [s] Settings  [t] Traffic  [d] Delete  [u] Update  [r] Refresh  [q] Quit")
+	help := helpStyle.Render("[Space] Toggle  [a] Add  [e] Edit  [p] Presets  [s] Settings  [t] Traffic  [d] Delete  [u] Update  [r] Refresh  [q] Quit")
 	return header + "\n\n" + body + "\n\n" + help
+}
+
+// writeProfileDiskDetail appends split/DNS/hosts/routes from the profile file.
+func writeProfileDiskDetail(detail *strings.Builder, name string) {
+	p, err := profile.Load(name)
+	if err != nil {
+		detail.WriteString("Profile: (could not load)\n")
+		return
+	}
+	presetName := p.SplitTunnel.BypassPreset
+	if presetName == "" {
+		presetName = "none"
+	}
+	detail.WriteString(fmt.Sprintf("Split: mode=%s preset=%s\n", p.EffectiveMode(), presetName))
+	if len(p.SplitTunnel.IPRanges) > 0 {
+		detail.WriteString("Routes:\n")
+		for i, c := range p.SplitTunnel.IPRanges {
+			if i >= 8 {
+				detail.WriteString(fmt.Sprintf("  … +%d more\n", len(p.SplitTunnel.IPRanges)-8))
+				break
+			}
+			detail.WriteString("  " + c + "\n")
+		}
+	} else {
+		detail.WriteString("Routes: (none)\n")
+	}
+	dnsState := "off"
+	if p.OverrideSystemDNS {
+		dnsState = "on"
+	}
+	servers := p.UpstreamDNSHost()
+	if len(p.DNS) > 0 {
+		servers = strings.Join(p.DNS, ",")
+	}
+	detail.WriteString(fmt.Sprintf("DNS: override=%s servers=%s\n", dnsState, servers))
+	if len(p.SplitTunnel.HostOverrides) > 0 {
+		detail.WriteString("Host Overrides:\n")
+		for i, o := range p.SplitTunnel.HostOverrides {
+			if i >= 12 {
+				detail.WriteString(fmt.Sprintf("  … +%d more\n", len(p.SplitTunnel.HostOverrides)-12))
+				break
+			}
+			detail.WriteString(fmt.Sprintf("  %s -> %s\n", o.Domain, o.IP))
+		}
+	} else {
+		detail.WriteString("Host Overrides: (none)\n")
+	}
 }
 
 func (m model) viewAddChooser() string {

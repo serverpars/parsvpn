@@ -51,7 +51,7 @@ parsvpn autostart                 # shows: autostart on/off + which profile reco
 sudo parsvpn autostart off
 sudo parsvpn autostart on
 
-# Interactive dashboard (press [a] to add; [e] to edit; [s] for settings)
+# Interactive dashboard (press [a] add; [e] edit; [p] presets; [s] settings)
 sudo parsvpn
 
 # Check / install updates (daemon also auto-updates by default)
@@ -72,6 +72,10 @@ Press **[s]** in the dashboard to change global options:
 | Reconnects as | Which profile auto-start restores (`c` clears it) |
 
 CLI: `parsvpn autoupdate on|off`, `parsvpn autostart on|off`.
+
+### Presets (TUI)
+
+Press **[p]** to manage bypass presets (same as `parsvpn preset …`). Apply a preset to a profile via **[e] → Split** (select `ir`, `none`, or any custom preset).
 
 ### Routes, hosts, DNS, and split mode
 

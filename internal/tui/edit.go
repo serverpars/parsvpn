@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/serverpars/parsvpn/internal/hostpin"
 	"github.com/serverpars/parsvpn/internal/ipc"
+	"github.com/serverpars/parsvpn/internal/preset"
 	"github.com/serverpars/parsvpn/internal/profile"
 )
 
@@ -46,9 +47,7 @@ func (m model) updateEditMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "h":
 		return m.openEditHosts()
 	case "s":
-		m.mode = modeEditSplit
-		m.err = ""
-		return m, nil
+		return m.openEditSplit()
 	case "d":
 		m.mode = modeEditDNS
 		m.nameInput.Blur()
@@ -216,11 +215,56 @@ func (m model) updateEditHostAdd(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m model) openEditSplit() (tea.Model, tea.Cmd) {
+	m.refreshSplitPresetList()
+	m.mode = modeEditSplit
+	m.err = ""
+	m.notice = ""
+	return m, nil
+}
+
+func (m *model) refreshSplitPresetList() {
+	cur := "none"
+	if p, err := profile.Load(m.editProfile); err == nil && p.SplitTunnel.BypassPreset != "" {
+		cur = p.SplitTunnel.BypassPreset
+	}
+	mark := func(id string) string {
+		if id == cur {
+			return "* "
+		}
+		return "  "
+	}
+	items := []list.Item{
+		presetListItem{id: "none", title: mark("none") + "none", desc: "Clear bypass preset"},
+		presetListItem{id: "ir", title: mark("ir") + "ir", desc: "Builtin Iran IPv4 bypass"},
+	}
+	if names, err := preset.List(); err == nil {
+		for _, n := range names {
+			desc := "Custom preset"
+			if p, err := preset.Load(n); err == nil {
+				desc = fmt.Sprintf("Custom — %d entries", len(p.Entries))
+			}
+			items = append(items, presetListItem{id: n, title: mark(n) + n, desc: desc})
+		}
+	}
+	m.editList.SetItems(items)
+	m.editList.Title = fmt.Sprintf("Bypass preset — %s", m.editProfile)
+	delegate := list.NewDefaultDelegate()
+	delegate.ShowDescription = true
+	m.editList.SetDelegate(delegate)
+	m.editList.SetShowHelp(false)
+	m.editList.SetShowStatusBar(false)
+	m.editList.SetFilteringEnabled(false)
+}
+
 func (m model) updateEditSplit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc":
+	case "esc", "q":
 		m.mode = modeEditMenu
 		m.err = ""
+		delegate := list.NewDefaultDelegate()
+		delegate.ShowDescription = false
+		m.editList.SetDelegate(delegate)
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
@@ -228,12 +272,19 @@ func (m model) updateEditSplit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, editSetMode(m.editProfile, profile.SplitModeInclude)
 	case "x":
 		return m, editSetMode(m.editProfile, profile.SplitModeExclude)
-	case "p":
-		return m, editSetPreset(m.editProfile, "ir")
-	case "n":
-		return m, editSetPreset(m.editProfile, "none")
+	case "m":
+		next, cmd := m.openPresets()
+		return next, cmd
+	case "enter", " ":
+		it, ok := m.editList.SelectedItem().(presetListItem)
+		if !ok {
+			return m, nil
+		}
+		return m, editSetPreset(m.editProfile, it.id)
 	}
-	return m, nil
+	var cmd tea.Cmd
+	m.editList, cmd = m.editList.Update(msg)
+	return m, cmd
 }
 
 func (m model) updateEditDNS(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -498,7 +549,7 @@ func (m model) viewEditMenu() string {
   [r]  Routes (split IP ranges / bypass CIDRs)
   [h]  Host overrides (DNS pins)
   [d]  System DNS override
-  [s]  Split mode & country preset
+  [s]  Split mode & bypass preset (ir / custom)
 `
 	var errLine string
 	if m.err != "" {
@@ -570,24 +621,15 @@ func (m model) viewEditHostAdd() string {
 
 func (m model) viewEditSplit() string {
 	header := titleStyle.Render(fmt.Sprintf("Split settings — %s", m.editProfile))
-	mode, preset := "include", "none"
+	mode, presetName := "include", "none"
 	if p, err := profile.Load(m.editProfile); err == nil {
 		mode = p.EffectiveMode()
 		if p.SplitTunnel.BypassPreset != "" {
-			preset = p.SplitTunnel.BypassPreset
+			presetName = p.SplitTunnel.BypassPreset
 		}
 	}
-	body := fmt.Sprintf(`Current: mode=%s  preset=%s
-
-Press a key to apply immediately (saved + reloads active tunnel):
-
-  [i]  Include — only listed routes via tunnel (clears country preset)
-  [x]  Exclude — tunnel everything except bypass
-  [p]  Iran preset (sets mode=exclude + bypass Iranian IPs)
-  [n]  Clear preset (none)
-
-Note: Iran preset requires exclude mode. Choosing [i] clears the preset.
-`, mode, preset)
+	hint := fmt.Sprintf("Current: mode=%s  preset=%s\n", mode, presetName) +
+		"[i] Include (clears preset)  [x] Exclude  [enter] Apply highlighted preset  [m] Manage presets"
 	var errLine string
 	if m.err != "" {
 		errLine = "\nError: " + m.err + "\n"
@@ -596,7 +638,7 @@ Note: Iran preset requires exclude mode. Choosing [i] clears the preset.
 		errLine += "\n" + m.notice + "\n"
 	}
 	help := helpStyle.Render("[esc] Back")
-	return header + "\n\n" + body + errLine + "\n" + help
+	return header + "\n" + hint + "\n\n" + m.editList.View() + errLine + "\n" + help
 }
 
 func (m model) viewEditDNS() string {
