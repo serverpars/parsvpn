@@ -12,6 +12,12 @@ Standalone, Linux-only WireGuard VPN client for ServerPars. Single static binary
 
 ## Install
 
+One-line install (Linux):
+
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/serverpars/parsvpn/main/scripts/install.sh)"
+```
+
 ```bash
 # From a prebuilt binary
 sudo ./scripts/install.sh ./dist/parsvpn-linux-amd64
