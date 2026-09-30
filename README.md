@@ -51,7 +51,7 @@ parsvpn autostart                 # shows: autostart on/off + which profile reco
 sudo parsvpn autostart off
 sudo parsvpn autostart on
 
-# Interactive dashboard (press [a] to add; [e] to edit routes/hosts/DNS/split)
+# Interactive dashboard (press [a] to add; [e] to edit; [s] for settings)
 sudo parsvpn
 
 # Check / install updates (daemon also auto-updates by default)
@@ -59,6 +59,19 @@ parsvpn update --check
 sudo parsvpn update
 sudo parsvpn update --disable-auto   # opt out of autopilot
 ```
+
+### Settings (TUI)
+
+Press **[s]** in the dashboard to change global options:
+
+| Setting | What it does |
+|---------|----------------|
+| Auto-update | Unattended GitHub release installs (default on) |
+| Auto-start | Reconnect last profile after reboot (default on) |
+| Update check interval | How often the daemon polls for releases |
+| Reconnects as | Which profile auto-start restores (`c` clears it) |
+
+CLI: `parsvpn autoupdate on|off`, `parsvpn autostart on|off`.
 
 ### Routes, hosts, DNS, and split mode
 

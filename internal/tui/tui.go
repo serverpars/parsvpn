@@ -48,6 +48,8 @@ const (
 	modeEditSplit
 	modeEditDNS
 	modeTraffic
+	modeSettings
+	modeSettingsEditInterval
 )
 
 type addSource int
@@ -266,6 +268,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(refreshTraffic, scheduleTick())
 		}
 		return m, scheduleTick()
+	case statusMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+		} else {
+			m.err = ""
+			m.status = msg.st
+			m.syncActiveFlags()
+			if m.mode == modeSettings {
+				m.refreshSettingsList()
+			}
+		}
 	case trafficMsg:
 		if msg.err != nil {
 			m.err = msg.err.Error()
@@ -322,6 +335,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mode = modeEditMenu
 		}
 		return m, tea.Batch(cmd, refreshStatus)
+	case settingsDoneMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			m.notice = ""
+			m.nameInput.Blur()
+			m.nameInput.Placeholder = "profile-name"
+			if msg.reopen {
+				m.mode = modeSettings
+				m.refreshSettingsList()
+			}
+			return m, nil
+		}
+		m.err = ""
+		m.notice = msg.message
+		m.nameInput.Blur()
+		m.nameInput.Placeholder = "profile-name"
+		if msg.reopen {
+			m.mode = modeSettings
+			return m, refreshStatus
+		}
+		m.mode = modeBrowse
+		return m, refreshStatus
 	case updateAvailableMsg:
 		m.updateVersion = msg.version
 	case updateAppliedMsg:
@@ -363,6 +398,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateEditDNS(msg)
 		case modeTraffic:
 			return m.updateTraffic(msg)
+		case modeSettings:
+			return m.updateSettings(msg)
+		case modeSettingsEditInterval:
+			return m.updateSettingsEditInterval(msg)
 		default:
 			return m.updateBrowse(msg)
 		}
@@ -380,7 +419,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.pasteArea, cmd = m.pasteArea.Update(msg)
 		return m, cmd
-	case modeAddName, modeEditRouteAdd, modeEditHostAdd:
+	case modeAddName, modeEditRouteAdd, modeEditHostAdd, modeSettingsEditInterval:
 		var cmd tea.Cmd
 		m.nameInput, cmd = m.nameInput.Update(msg)
 		return m, cmd
@@ -391,7 +430,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m, nil
-	case modeEditRoutes, modeEditHosts:
+	case modeEditRoutes, modeEditHosts, modeSettings:
 		var cmd tea.Cmd
 		m.editList, cmd = m.editList.Update(msg)
 		return m, cmd
@@ -448,6 +487,9 @@ func (m model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "e":
 		next, cmd := m.beginEdit()
+		return next, cmd
+	case "s":
+		next, cmd := m.openSettings()
 		return next, cmd
 	case "t":
 		m.mode = modeTraffic
@@ -708,6 +750,10 @@ func (m model) View() string {
 		return m.viewEditDNS()
 	case modeTraffic:
 		return m.viewTraffic()
+	case modeSettings:
+		return m.viewSettings()
+	case modeSettingsEditInterval:
+		return m.viewSettingsEditInterval()
 	default:
 		return m.viewBrowse()
 	}
@@ -862,7 +908,7 @@ func (m model) viewBrowse() string {
 	}
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, m.list.View(), detailStyle.Render(detail.String()))
-	help := helpStyle.Render("[Space] Toggle  [a] Add  [e] Edit  [t] Traffic  [d] Delete  [u] Update  [r] Refresh  [q] Quit")
+	help := helpStyle.Render("[Space] Toggle  [a] Add  [e] Edit  [s] Settings  [t] Traffic  [d] Delete  [u] Update  [r] Refresh  [q] Quit")
 	return header + "\n\n" + body + "\n\n" + help
 }
 
