@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/serverpars/parsvpn/internal/constants"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 // HostOverride maps a domain to a fixed IPv4/IPv6 address for the embedded DNS proxy.
@@ -145,18 +146,37 @@ func List() ([]string, error) {
 	return names, nil
 }
 
+// NewEmpty creates a tunnel profile with a fresh private key and no peers/address.
+// Edit the JSON under ProfilesDir before bringing it up.
+func NewEmpty(name string) (*Profile, error) {
+	if err := ValidateName(name); err != nil {
+		return nil, err
+	}
+	key, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		return nil, fmt.Errorf("generate private key: %w", err)
+	}
+	p := &Profile{
+		Name:       name,
+		PrivateKey: key.String(),
+		Peers:      []Peer{},
+	}
+	if err := p.Normalize(); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
 // Normalize fills split_tunnel.ip_ranges from peer AllowedIPs when empty,
 // and drops 0.0.0.0/0 / ::/0 unless the profile already listed them explicitly
 // in split_tunnel (v1 default is split-only).
+// Incomplete profiles (empty tunnel) are allowed — call ValidateComplete before connect.
 func (p *Profile) Normalize() error {
 	if p.PrivateKey == "" {
 		return fmt.Errorf("profile %q: private_key required", p.Name)
 	}
-	if p.Address == "" {
-		return fmt.Errorf("profile %q: address required", p.Name)
-	}
-	if len(p.Peers) == 0 {
-		return fmt.Errorf("profile %q: at least one peer required", p.Name)
+	if p.Peers == nil {
+		p.Peers = []Peer{}
 	}
 	if len(p.SplitTunnel.IPRanges) == 0 {
 		seen := map[string]struct{}{}
@@ -173,6 +193,20 @@ func (p *Profile) Normalize() error {
 				p.SplitTunnel.IPRanges = append(p.SplitTunnel.IPRanges, cidr)
 			}
 		}
+	}
+	return nil
+}
+
+// ValidateComplete ensures the profile can be brought up.
+func (p *Profile) ValidateComplete() error {
+	if p.PrivateKey == "" {
+		return fmt.Errorf("profile %q: private_key required", p.Name)
+	}
+	if p.Address == "" {
+		return fmt.Errorf("profile %q: address required (edit the profile or import a full WireGuard conf)", p.Name)
+	}
+	if len(p.Peers) == 0 {
+		return fmt.Errorf("profile %q: at least one peer required (edit the profile or import a full WireGuard conf)", p.Name)
 	}
 	return nil
 }

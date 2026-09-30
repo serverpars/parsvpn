@@ -33,12 +33,18 @@ sudo ./scripts/install.sh ./dist/parsvpn-linux-amd64
 # Import a WireGuard config
 sudo parsvpn profile add --file ./office.conf --name office
 
+# Paste / pipe a WireGuard config
+cat office.conf | sudo parsvpn profile add --file - --name office
+
+# Create an empty tunnel (edit the JSON before connecting)
+sudo parsvpn profile add --empty --name scratch
+
 # Connect / disconnect
 sudo parsvpn up office
 parsvpn status --json
 sudo parsvpn down
 
-# Interactive dashboard (press [a] to add a profile, [u] to update)
+# Interactive dashboard (press [a] to add: file, paste, or empty tunnel)
 sudo parsvpn
 
 # Check / install updates (daemon also auto-updates by default)

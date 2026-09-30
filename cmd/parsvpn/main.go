@@ -134,14 +134,37 @@ func cmdProfile() *cobra.Command {
 		Short: "Manage VPN profiles",
 	}
 	var file, name string
+	var empty bool
 	add := &cobra.Command{
 		Use:   "add",
-		Short: "Import a WireGuard .conf or ParsVPN JSON profile",
+		Short: "Import a WireGuard .conf / JSON profile, paste via stdin, or create an empty tunnel",
+		Long: `Add a VPN profile.
+
+  --file PATH   Import WireGuard .conf or ParsVPN .json (use - for stdin)
+  --empty       Create an empty tunnel with a generated private key
+  --name NAME   Profile name (required with --empty; default: filename stem)
+
+Examples:
+  sudo parsvpn profile add --file ./office.conf --name office
+  cat office.conf | sudo parsvpn profile add --file - --name office
+  sudo parsvpn profile add --empty --name scratch`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if file == "" {
-				return fmt.Errorf("--file is required")
+			if empty && file != "" {
+				return fmt.Errorf("use only one of --empty / --file")
 			}
-			p, err := profile.ImportFile(file, name)
+			if !empty && file == "" {
+				return fmt.Errorf("required: --file or --empty")
+			}
+			var p *profile.Profile
+			var err error
+			if empty {
+				if name == "" {
+					return fmt.Errorf("--name is required with --empty")
+				}
+				p, err = profile.NewEmpty(name)
+			} else {
+				p, err = profile.ImportFile(file, name)
+			}
 			if err != nil {
 				return err
 			}
@@ -152,9 +175,9 @@ func cmdProfile() *cobra.Command {
 			return nil
 		},
 	}
-	add.Flags().StringVar(&file, "file", "", "path to .conf or .json")
+	add.Flags().StringVar(&file, "file", "", "path to .conf or .json (use - to read stdin)")
 	add.Flags().StringVar(&name, "name", "", "profile name (default: filename stem)")
-	_ = add.MarkFlagRequired("file")
+	add.Flags().BoolVar(&empty, "empty", false, "create an empty tunnel with a generated private key")
 
 	listCmd := &cobra.Command{
 		Use:   "list",

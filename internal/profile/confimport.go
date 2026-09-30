@@ -3,6 +3,7 @@ package profile
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -10,20 +11,30 @@ import (
 
 // ImportWireGuardConf parses a standard wg-quick .conf into a Profile.
 func ImportWireGuardConf(path, name string) (*Profile, error) {
-	if err := ValidateName(name); err != nil {
-		return nil, err
-	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	return ImportWireGuardConfReader(f, name)
+}
+
+// ImportWireGuardConfContent parses WireGuard conf text (e.g. pasted) into a Profile.
+func ImportWireGuardConfContent(content, name string) (*Profile, error) {
+	return ImportWireGuardConfReader(strings.NewReader(content), name)
+}
+
+// ImportWireGuardConfReader parses a standard wg-quick .conf from r into a Profile.
+func ImportWireGuardConfReader(r io.Reader, name string) (*Profile, error) {
+	if err := ValidateName(name); err != nil {
+		return nil, err
+	}
 
 	p := &Profile{Name: name}
 	var curPeer *Peer
 	section := ""
 
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
@@ -97,6 +108,9 @@ func ImportWireGuardConf(path, name string) (*Profile, error) {
 		return nil, err
 	}
 	if err := p.Normalize(); err != nil {
+		return nil, err
+	}
+	if err := p.ValidateComplete(); err != nil {
 		return nil, err
 	}
 	return p, nil

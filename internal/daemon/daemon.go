@@ -151,6 +151,9 @@ func (d *Daemon) Up(name string) error {
 	if err != nil {
 		return err
 	}
+	if err := p.ValidateComplete(); err != nil {
+		return err
+	}
 	if d.active != nil {
 		if err := d.downLocked(); err != nil {
 			return err

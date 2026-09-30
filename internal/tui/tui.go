@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/filepicker"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -33,9 +34,19 @@ type mode int
 
 const (
 	modeBrowse mode = iota
+	modeAddChooser
 	modeAddFile
+	modeAddPaste
 	modeAddName
 	modeConfirmDelete
+)
+
+type addSource int
+
+const (
+	addFromFile addSource = iota
+	addFromPaste
+	addEmpty
 )
 
 type item struct {
@@ -61,8 +72,11 @@ type model struct {
 	width         int
 	height        int
 	picker        filepicker.Model
+	pasteArea     textarea.Model
 	nameInput     textinput.Model
 	addPath       string
+	addContent    string
+	addSource     addSource
 	deleteName    string
 	updateVersion string
 	updating      bool
@@ -140,7 +154,15 @@ func newModel(names []string, st ipc.StatusPayload) model {
 	ti.CharLimit = 64
 	ti.Width = 32
 
-	return model{list: l, status: st, picker: fp, nameInput: ti}
+	ta := textarea.New()
+	ta.Placeholder = "Paste a WireGuard .conf here..."
+	ta.CharLimit = 64 * 1024
+	ta.ShowLineNumbers = false
+	ta.Prompt = ""
+	ta.SetWidth(60)
+	ta.SetHeight(12)
+
+	return model{list: l, status: st, picker: fp, nameInput: ti, pasteArea: ta}
 }
 
 func (m model) Init() tea.Cmd {
@@ -208,6 +230,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		listH := max(5, msg.Height-8)
 		m.list.SetSize(max(20, msg.Width/2-2), listH)
 		m.picker.SetHeight(max(8, msg.Height-10))
+		m.pasteArea.SetWidth(max(40, msg.Width-4))
+		m.pasteArea.SetHeight(max(8, msg.Height-10))
 	case tickMsg:
 		if m.mode == modeBrowse {
 			return m, tea.Batch(refreshStatus, scheduleTick())
@@ -237,8 +261,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.mode = modeBrowse
 		m.addPath = ""
+		m.addContent = ""
 		m.deleteName = ""
 		m.nameInput.Blur()
+		m.pasteArea.Blur()
+		m.pasteArea.Reset()
 		return m, tea.Batch(refreshProfiles, refreshStatus)
 	case updateAvailableMsg:
 		m.updateVersion = msg.version
@@ -253,8 +280,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tea.KeyMsg:
 		switch m.mode {
+		case modeAddChooser:
+			return m.updateAddChooser(msg)
 		case modeAddFile:
 			return m.updateAddFile(msg)
+		case modeAddPaste:
+			return m.updateAddPaste(msg)
 		case modeAddName:
 			return m.updateAddName(msg)
 		case modeConfirmDelete:
@@ -269,8 +300,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.picker, cmd = m.picker.Update(msg)
 		if didSelect, path := m.picker.DidSelectFile(msg); didSelect {
-			return m.beginNameInput(path)
+			return m.beginNameInput(path, "")
 		}
+		return m, cmd
+	case modeAddPaste:
+		var cmd tea.Cmd
+		m.pasteArea, cmd = m.pasteArea.Update(msg)
 		return m, cmd
 	case modeAddName:
 		var cmd tea.Cmd
@@ -298,11 +333,12 @@ func (m model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.notice = ""
 		return m, tea.Batch(refreshStatus, refreshProfiles)
 	case "a":
-		m.mode = modeAddFile
+		m.mode = modeAddChooser
 		m.err = ""
 		m.notice = ""
 		m.addPath = ""
-		return m, m.picker.Init()
+		m.addContent = ""
+		return m, nil
 	case "u":
 		if m.updateVersion == "" || m.updating {
 			return m, nil
@@ -332,21 +368,51 @@ func (m model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m model) updateAddChooser(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q", "ctrl+c":
+		m.mode = modeBrowse
+		m.err = ""
+		return m, nil
+	case "f":
+		m.mode = modeAddFile
+		m.addSource = addFromFile
+		m.err = ""
+		return m, m.picker.Init()
+	case "p":
+		m.mode = modeAddPaste
+		m.addSource = addFromPaste
+		m.pasteArea.Reset()
+		m.err = ""
+		return m, m.pasteArea.Focus()
+	case "e":
+		m.addSource = addEmpty
+		m.addPath = ""
+		m.addContent = ""
+		return m.beginNameInput("", "tunnel")
+	}
+	return m, nil
+}
+
 func (m model) updateAddFile(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "ctrl+c":
+	case "esc":
+		m.mode = modeAddChooser
+		m.err = ""
+		return m, nil
+	case "ctrl+c":
 		m.mode = modeBrowse
 		m.err = ""
 		return m, nil
 	case "q":
-		// Don't quit the whole app while adding; cancel instead.
-		m.mode = modeBrowse
+		// Don't quit the whole app while adding; go back to chooser.
+		m.mode = modeAddChooser
 		return m, nil
 	}
 	var cmd tea.Cmd
 	m.picker, cmd = m.picker.Update(msg)
 	if didSelect, path := m.picker.DidSelectFile(msg); didSelect {
-		return m.beginNameInput(path)
+		return m.beginNameInput(path, "")
 	}
 	if didSelect, path := m.picker.DidSelectDisabledFile(msg); didSelect {
 		m.err = path + " is not a .conf or .json profile"
@@ -355,10 +421,43 @@ func (m model) updateAddFile(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m model) beginNameInput(path string) (tea.Model, tea.Cmd) {
+func (m model) updateAddPaste(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = modeAddChooser
+		m.pasteArea.Blur()
+		m.err = ""
+		return m, nil
+	case "ctrl+c":
+		m.mode = modeBrowse
+		m.pasteArea.Blur()
+		m.pasteArea.Reset()
+		return m, nil
+	case "ctrl+s", "ctrl+d":
+		content := strings.TrimSpace(m.pasteArea.Value())
+		if content == "" {
+			m.err = "paste a WireGuard config first"
+			return m, nil
+		}
+		m.addContent = content
+		m.pasteArea.Blur()
+		return m.beginNameInput("", "pasted")
+	}
+	var cmd tea.Cmd
+	m.pasteArea, cmd = m.pasteArea.Update(msg)
+	return m, cmd
+}
+
+func (m model) beginNameInput(path, defaultName string) (tea.Model, tea.Cmd) {
 	m.addPath = path
 	m.mode = modeAddName
-	stem := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	stem := defaultName
+	if path != "" {
+		stem = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	}
+	if stem == "" {
+		stem = "tunnel"
+	}
 	m.nameInput.SetValue(stem)
 	m.nameInput.CursorEnd()
 	cmd := m.nameInput.Focus()
@@ -369,19 +468,30 @@ func (m model) beginNameInput(path string) (tea.Model, tea.Cmd) {
 func (m model) updateAddName(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.mode = modeAddFile
 		m.nameInput.Blur()
 		m.err = ""
-		return m, nil
+		switch m.addSource {
+		case addFromPaste:
+			m.mode = modeAddPaste
+			return m, m.pasteArea.Focus()
+		case addFromFile:
+			m.mode = modeAddFile
+			return m, nil
+		default:
+			m.mode = modeAddChooser
+			return m, nil
+		}
 	case "ctrl+c":
 		m.mode = modeBrowse
 		m.nameInput.Blur()
 		return m, nil
 	case "enter":
 		name := strings.TrimSpace(m.nameInput.Value())
+		src := m.addSource
 		path := m.addPath
+		content := m.addContent
 		m.nameInput.Blur()
-		return m, saveProfile(path, name)
+		return m, saveProfile(src, path, content, name)
 	}
 	var cmd tea.Cmd
 	m.nameInput, cmd = m.nameInput.Update(msg)
@@ -401,16 +511,29 @@ func (m model) updateConfirmDelete(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func saveProfile(path, name string) tea.Cmd {
+func saveProfile(src addSource, path, content, name string) tea.Cmd {
 	return func() tea.Msg {
-		p, err := profile.ImportFile(path, name)
+		var p *profile.Profile
+		var err error
+		switch src {
+		case addEmpty:
+			p, err = profile.NewEmpty(name)
+		case addFromPaste:
+			p, err = profile.ImportBytes([]byte(content), name)
+		default:
+			p, err = profile.ImportFile(path, name)
+		}
 		if err != nil {
 			return opDoneMsg{err: err}
 		}
 		if err := profile.Save(p); err != nil {
 			return opDoneMsg{err: fmt.Errorf("save profile: %w (try running as root)", err)}
 		}
-		return opDoneMsg{message: fmt.Sprintf("saved profile %q", p.Name)}
+		msg := fmt.Sprintf("saved profile %q", p.Name)
+		if src == addEmpty {
+			msg = fmt.Sprintf("created empty tunnel %q — edit %s before connecting", p.Name, profile.Path(p.Name))
+		}
+		return opDoneMsg{message: msg}
 	}
 }
 
@@ -466,8 +589,12 @@ func (m *model) setProfiles(names []string) {
 
 func (m model) View() string {
 	switch m.mode {
+	case modeAddChooser:
+		return m.viewAddChooser()
 	case modeAddFile:
 		return m.viewAddFile()
+	case modeAddPaste:
+		return m.viewAddPaste()
 	case modeAddName:
 		return m.viewAddName()
 	case modeConfirmDelete:
@@ -499,7 +626,7 @@ func (m model) viewBrowse() string {
 			}
 		}
 	} else if len(m.list.Items()) == 0 {
-		detail.WriteString("No profiles yet.\nPress [a] to import a WireGuard .conf or JSON profile.\n")
+		detail.WriteString("No profiles yet.\nPress [a] to add a profile (file, paste, or empty tunnel).\n")
 	} else {
 		detail.WriteString("No active tunnel.\nSelect a profile and press Space to connect.\n")
 	}
@@ -519,20 +646,51 @@ func (m model) viewBrowse() string {
 	return header + "\n\n" + body + "\n\n" + help
 }
 
+func (m model) viewAddChooser() string {
+	header := titleStyle.Render("Add profile")
+	body := `How do you want to add a profile?
+
+  [f]  Import from file (.conf / .json)
+  [p]  Paste WireGuard config
+  [e]  Create empty tunnel
+`
+	help := helpStyle.Render("[esc] Cancel")
+	return header + "\n\n" + body + "\n" + help
+}
+
 func (m model) viewAddFile() string {
 	header := titleStyle.Render("Add profile") + " — select a WireGuard .conf or .json file"
 	var errLine string
 	if m.err != "" {
 		errLine = "\n" + m.err + "\n"
 	}
-	help := helpStyle.Render("[enter] Select  [h] Up dir  [esc] Cancel")
+	help := helpStyle.Render("[enter] Select  [h] Up dir  [esc] Back")
 	return header + "\n\n" + m.picker.View() + errLine + "\n" + help
+}
+
+func (m model) viewAddPaste() string {
+	header := titleStyle.Render("Add profile") + " — paste WireGuard config"
+	var errLine string
+	if m.err != "" {
+		errLine = "\n" + m.err + "\n"
+	}
+	help := helpStyle.Render("[ctrl+s] Continue  [esc] Back")
+	return header + "\n\n" + m.pasteArea.View() + errLine + "\n" + help
 }
 
 func (m model) viewAddName() string {
 	header := titleStyle.Render("Add profile")
-	body := fmt.Sprintf("File: %s\n\n%s\n%s",
-		m.addPath,
+	var sourceLine string
+	switch m.addSource {
+	case addEmpty:
+		sourceLine = "Creating empty tunnel (generated private key)"
+	case addFromPaste:
+		sourceLine = "Source: pasted WireGuard config"
+	default:
+		sourceLine = fmt.Sprintf("File: %s", m.addPath)
+	}
+	body := fmt.Sprintf("%s\n\n%s\n%s",
+		sourceLine,
 		promptStyle.Render("Profile name:"),
 		m.nameInput.View(),
 	)
