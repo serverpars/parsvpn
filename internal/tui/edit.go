@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/serverpars/parsvpn/internal/hostpin"
 	"github.com/serverpars/parsvpn/internal/ipc"
 	"github.com/serverpars/parsvpn/internal/profile"
 )
@@ -148,7 +149,7 @@ func (m model) updateEditHosts(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		m.mode = modeEditHostAdd
 		m.nameInput.SetValue("")
-		m.nameInput.Placeholder = "db.internal 10.10.0.50"
+		m.nameInput.Placeholder = "example.com"
 		cmd := m.nameInput.Focus()
 		m.err = ""
 		return m, cmd
@@ -179,14 +180,17 @@ func (m model) updateEditHostAdd(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "enter":
-		raw := strings.TrimSpace(m.nameInput.Value())
+		domain := strings.TrimSpace(m.nameInput.Value())
 		m.nameInput.Blur()
-		parts := strings.Fields(raw)
-		if len(parts) != 2 {
-			m.err = "enter: domain IP"
+		if domain == "" {
+			m.err = "domain required"
 			return m, nil
 		}
-		return m, editAddHost(m.editProfile, parts[0], parts[1])
+		if strings.ContainsAny(domain, " \t") {
+			m.err = "enter domain only (IP is resolved via tunnel DNS)"
+			return m, nil
+		}
+		return m, editAddHost(m.editProfile, domain)
 	}
 	var cmd tea.Cmd
 	m.nameInput, cmd = m.nameInput.Update(msg)
@@ -269,32 +273,22 @@ func editRemoveRoute(profileName, cidr string) tea.Cmd {
 	}
 }
 
-func editAddHost(profileName, domain, ip string) tea.Cmd {
+func editAddHost(profileName, domain string) tea.Cmd {
 	return func() tea.Msg {
-		p, err := profile.Load(profileName)
+		ip, err := hostpin.Add(profileName, domain)
 		if err != nil {
 			return editDoneMsg{err: err, reopen: "hosts"}
 		}
-		if err := p.AddHostOverride(domain, ip); err != nil {
-			return editDoneMsg{err: err, reopen: "hosts"}
+		return editDoneMsg{
+			message: fmt.Sprintf("pinned %s -> %s (+ route, via tunnel DNS)", domain, ip),
+			reopen:  "hosts",
 		}
-		if err := saveAndReload(p); err != nil {
-			return editDoneMsg{err: err, reopen: "hosts"}
-		}
-		return editDoneMsg{message: fmt.Sprintf("host %s -> %s", domain, ip), reopen: "hosts"}
 	}
 }
 
 func editRemoveHost(profileName, domain string) tea.Cmd {
 	return func() tea.Msg {
-		p, err := profile.Load(profileName)
-		if err != nil {
-			return editDoneMsg{err: err, reopen: "hosts"}
-		}
-		if err := p.RemoveHostOverride(domain); err != nil {
-			return editDoneMsg{err: err, reopen: "hosts"}
-		}
-		if err := saveAndReload(p); err != nil {
+		if err := hostpin.Remove(profileName, domain); err != nil {
 			return editDoneMsg{err: err, reopen: "hosts"}
 		}
 		return editDoneMsg{message: "removed host " + domain, reopen: "hosts"}
@@ -329,7 +323,11 @@ func editSetPreset(profileName, preset string) tea.Cmd {
 		if err := saveAndReload(p); err != nil {
 			return editDoneMsg{err: err, reopen: "split"}
 		}
-		return editDoneMsg{message: "preset=" + preset, reopen: "split"}
+		msg := "preset=none"
+		if p.SplitTunnel.BypassPreset != "" {
+			msg = fmt.Sprintf("mode=exclude preset=%s (Iran bypass active after reload)", p.SplitTunnel.BypassPreset)
+		}
+		return editDoneMsg{message: msg, reopen: "split"}
 	}
 }
 
@@ -402,12 +400,13 @@ func (m model) viewEditHosts() string {
 
 func (m model) viewEditHostAdd() string {
 	header := titleStyle.Render(fmt.Sprintf("Add host — %s", m.editProfile))
-	body := promptStyle.Render("domain IP:") + "\n" + m.nameInput.View()
+	body := "Resolves via tunnel DNS, then pins domain→IP and adds a /32 route.\nProfile must be connected.\n\n" +
+		promptStyle.Render("domain:") + "\n" + m.nameInput.View()
 	var errLine string
 	if m.err != "" {
 		errLine = "\nError: " + m.err + "\n"
 	}
-	help := helpStyle.Render("[enter] Save  [esc] Back")
+	help := helpStyle.Render("[enter] Resolve & pin  [esc] Back")
 	return header + "\n\n" + body + errLine + "\n\n" + help
 }
 
@@ -424,8 +423,10 @@ func (m model) viewEditSplit() string {
 
   [i]  Include — only listed routes via tunnel
   [x]  Exclude — tunnel everything except bypass
-  [p]  Preset Iran (ir) — for exclude mode
+  [p]  Iran preset (sets mode=exclude + bypass Iranian IPs)
   [n]  Clear preset (none)
+
+Note: preset only works in exclude mode (choosing [p] enables exclude).
 `, mode, preset)
 	var errLine string
 	if m.err != "" {

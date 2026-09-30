@@ -11,6 +11,7 @@ import (
 
 	"github.com/serverpars/parsvpn/internal/constants"
 	"github.com/serverpars/parsvpn/internal/daemon"
+	"github.com/serverpars/parsvpn/internal/hostpin"
 	"github.com/serverpars/parsvpn/internal/ipc"
 	"github.com/serverpars/parsvpn/internal/profile"
 	"github.com/serverpars/parsvpn/internal/tui"
@@ -322,40 +323,45 @@ func cmdHost() *cobra.Command {
 		},
 	}
 	add := &cobra.Command{
-		Use:   "add <profile> <domain> <ip>",
-		Short: "Add or replace a host override",
-		Args:  cobra.ExactArgs(3),
+		Use:   "add <profile> <domain> [ip]",
+		Short: "Pin a host: resolve domain via tunnel DNS (or use given IP), override + route",
+		Long: `Add a DNS host override and a /32 route for the resolved IP.
+
+With only <domain>, the profile must be connected. DNS is queried through the
+tunnel (exclude mode, or by temporarily routing the resolver in include mode).`,
+		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			p, err := profile.Load(args[0])
+			if len(args) == 3 {
+				p, err := profile.Load(args[0])
+				if err != nil {
+					return err
+				}
+				if err := p.PinHost(args[1], args[2]); err != nil {
+					return err
+				}
+				if err := saveProfileAndReload(p); err != nil {
+					return err
+				}
+				fmt.Printf("host override %s -> %s on %s (+ route)\n", args[1], args[2], p.Name)
+				return nil
+			}
+			ip, err := hostpin.Add(args[0], args[1])
 			if err != nil {
 				return err
 			}
-			if err := p.AddHostOverride(args[1], args[2]); err != nil {
-				return err
-			}
-			if err := saveProfileAndReload(p); err != nil {
-				return err
-			}
-			fmt.Printf("host override %s -> %s on %s\n", args[1], args[2], p.Name)
+			fmt.Printf("host override %s -> %s on %s (+ route, via tunnel DNS)\n", args[1], ip, args[0])
 			return nil
 		},
 	}
 	rm := &cobra.Command{
 		Use:   "rm <profile> <domain>",
-		Short: "Remove a host override",
+		Short: "Remove a host override and its pinned /32 route",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			p, err := profile.Load(args[0])
-			if err != nil {
+			if err := hostpin.Remove(args[0], args[1]); err != nil {
 				return err
 			}
-			if err := p.RemoveHostOverride(args[1]); err != nil {
-				return err
-			}
-			if err := saveProfileAndReload(p); err != nil {
-				return err
-			}
-			fmt.Printf("removed host override %s from %s\n", args[1], p.Name)
+			fmt.Printf("removed host override %s from %s\n", args[1], args[0])
 			return nil
 		},
 	}
@@ -389,7 +395,7 @@ func cmdSplit() *cobra.Command {
 	}
 	presetCmd := &cobra.Command{
 		Use:   "preset <profile> <ir|none>",
-		Short: "Set exclude-mode bypass preset (Iran CIDRs when ir)",
+		Short: "Set exclude-mode bypass preset (ir also enables exclude mode)",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := profile.Load(args[0])
@@ -402,7 +408,7 @@ func cmdSplit() *cobra.Command {
 			if err := saveProfileAndReload(p); err != nil {
 				return err
 			}
-			fmt.Printf("profile %s bypass_preset=%s\n", p.Name, orDash(p.SplitTunnel.BypassPreset))
+			fmt.Printf("profile %s mode=%s bypass_preset=%s\n", p.Name, p.EffectiveMode(), orDash(p.SplitTunnel.BypassPreset))
 			return nil
 		},
 	}

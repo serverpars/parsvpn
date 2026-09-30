@@ -206,6 +206,9 @@ func (p *Profile) Normalize() error {
 		if _, err := geo.PresetCIDRs(preset); err != nil {
 			return fmt.Errorf("profile %q: %w", p.Name, err)
 		}
+		// Presets only apply in exclude mode — force it so "ir" actually bypasses.
+		p.SplitTunnel.Mode = SplitModeExclude
+		mode = SplitModeExclude
 	}
 	// Only auto-fill include ranges from AllowedIPs; exclude mode keeps explicit bypass list.
 	if mode == SplitModeInclude && len(p.SplitTunnel.IPRanges) == 0 {
@@ -438,7 +441,7 @@ func (p *Profile) SetSplitMode(mode string) error {
 	return nil
 }
 
-// SetBypassPreset sets ir|none|"".
+// SetBypassPreset sets ir|none|"". Non-empty presets switch mode to exclude.
 func (p *Profile) SetBypassPreset(name string) error {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "none" {
@@ -448,7 +451,83 @@ func (p *Profile) SetBypassPreset(name string) error {
 		if _, err := geo.PresetCIDRs(name); err != nil {
 			return err
 		}
+		p.SplitTunnel.Mode = SplitModeExclude
 	}
 	p.SplitTunnel.BypassPreset = name
 	return nil
+}
+
+// UpstreamDNSHost returns the first profile DNS server or Cloudflare 1.1.1.1.
+func (p *Profile) UpstreamDNSHost() string {
+	for _, d := range p.DNS {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		host := d
+		if h, _, err := net.SplitHostPort(d); err == nil {
+			host = h
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			return ip.String()
+		}
+	}
+	return "1.1.1.1"
+}
+
+// PinHost sets a host override and adds the IP as a /32 (or /128) tunnel route.
+func (p *Profile) PinHost(domain, ipStr string) error {
+	if err := p.AddHostOverride(domain, ipStr); err != nil {
+		return err
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return fmt.Errorf("invalid IP %q", ipStr)
+	}
+	cidr := ip.String() + "/32"
+	if ip.To4() == nil {
+		cidr = ip.String() + "/128"
+	}
+	return p.AddRoutes(cidr)
+}
+
+// UnpinHost removes a host override and its matching /32|/128 route when present.
+func (p *Profile) UnpinHost(domain string) error {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	var ipStr string
+	for _, o := range p.SplitTunnel.HostOverrides {
+		if strings.EqualFold(o.Domain, domain) {
+			ipStr = o.IP
+			break
+		}
+	}
+	if err := p.RemoveHostOverride(domain); err != nil {
+		return err
+	}
+	if ipStr != "" {
+		_ = p.RemoveRoutes(ipStr)
+	}
+	return nil
+}
+
+// EnsureResolverRouted adds upstream DNS /32 to include-mode routes so lookups
+// can traverse the tunnel. Returns whether a route was added.
+func (p *Profile) EnsureResolverRouted(dnsHost string) (bool, error) {
+	if p.EffectiveMode() != SplitModeInclude {
+		return false, nil
+	}
+	ip := net.ParseIP(dnsHost)
+	if ip == nil || ip.To4() == nil {
+		return false, fmt.Errorf("resolver must be an IPv4 address, got %q", dnsHost)
+	}
+	want := ip.String() + "/32"
+	for _, c := range p.SplitTunnel.IPRanges {
+		if c == want || c == ip.String() {
+			return false, nil
+		}
+	}
+	if err := p.AddRoutes(want); err != nil {
+		return false, err
+	}
+	return true, nil
 }

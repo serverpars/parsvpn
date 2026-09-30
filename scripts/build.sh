@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${VERSION:-1.3.1}"
+VERSION="${VERSION:-1.3.2}"
 DIST_DIR="./dist"
 mkdir -p "${DIST_DIR}"
 

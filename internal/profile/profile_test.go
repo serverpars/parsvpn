@@ -120,13 +120,16 @@ func TestExcludeBypassPreset(t *testing.T) {
 			AllowedIPs: []string{"10.0.0.0/8"},
 		}},
 		SplitTunnel: SplitTunnel{
-			Mode:         SplitModeExclude,
+			Mode:         SplitModeInclude, // preset must force exclude
 			BypassPreset: "ir",
 			IPRanges:     []string{"192.168.1.0/24"},
 		},
 	}
 	if err := p.Normalize(); err != nil {
 		t.Fatal(err)
+	}
+	if p.EffectiveMode() != SplitModeExclude {
+		t.Fatalf("preset should force exclude, got %s", p.EffectiveMode())
 	}
 	bypass, err := p.BypassCIDRs()
 	if err != nil {
@@ -157,6 +160,39 @@ func TestExcludeBypassPreset(t *testing.T) {
 	}
 	if p.PrimaryEndpointHost() != "198.51.100.1" {
 		t.Fatalf("endpoint host: %s", p.PrimaryEndpointHost())
+	}
+}
+
+func TestPinHost(t *testing.T) {
+	p := &Profile{
+		Name:       "r",
+		PrivateKey: "k",
+		Address:    "10.0.0.2/32",
+		Peers:      []Peer{{PublicKey: "p", AllowedIPs: []string{"10.0.0.0/8"}}},
+	}
+	if err := p.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.PinHost("db.internal", "10.10.0.5"); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.SplitTunnel.HostOverrides) != 1 {
+		t.Fatal("override missing")
+	}
+	found := false
+	for _, c := range p.SplitTunnel.IPRanges {
+		if c == "10.10.0.5/32" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("route missing: %#v", p.SplitTunnel.IPRanges)
+	}
+	if err := p.UnpinHost("db.internal"); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.SplitTunnel.HostOverrides) != 0 {
+		t.Fatal("override not removed")
 	}
 }
 

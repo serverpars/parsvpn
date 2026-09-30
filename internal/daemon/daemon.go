@@ -352,7 +352,12 @@ func (d *Daemon) statusLocked() ipc.StatusPayload {
 			st.SplitIPs = append(st.SplitIPs, "bypass:"+c)
 		}
 	} else {
-		st.SplitIPs = append([]string{"mode=include"}, d.active.DestinationCIDRs()...)
+		preset := d.active.SplitTunnel.BypassPreset
+		if preset == "" {
+			preset = "none"
+		}
+		st.SplitIPs = []string{fmt.Sprintf("mode=include preset=%s", preset)}
+		st.SplitIPs = append(st.SplitIPs, d.active.DestinationCIDRs()...)
 	}
 	st.Userspace = d.wg != nil && d.wg.Userspace()
 	if len(d.active.Peers) > 0 {

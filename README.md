@@ -64,11 +64,11 @@ sudo parsvpn route rm office 203.0.113.0/24
 
 # DNS host overrides (embedded resolver)
 parsvpn host list office
-sudo parsvpn host add office db.internal 10.10.0.50
-sudo parsvpn host rm office db.internal
+sudo parsvpn host add office example.com          # resolve via tunnel DNS, pin + route
+sudo parsvpn host add office db.internal 10.10.0.50  # optional explicit IP
+sudo parsvpn host rm office example.com
 
-# Tunnel everything except Iran (and any extra bypass CIDRs in ip_ranges)
-sudo parsvpn split mode office exclude
+# Tunnel everything except Iran (preset enables exclude mode)
 sudo parsvpn split preset office ir
 sudo parsvpn up office
 
