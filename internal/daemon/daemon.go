@@ -196,7 +196,7 @@ func (d *Daemon) Up(name string) error {
 	}
 
 	d.active = p
-	_ = os.WriteFile(constants.WantedPath, []byte(p.Name+"\n"), 0o600)
+	_ = writeWanted(p.Name)
 	_ = d.persistStateLocked()
 	if err := d.net.WatchLinkDeleted(d.stopCh, func() {
 		select {
@@ -301,12 +301,12 @@ func (d *Daemon) Reload() error {
 	return nil
 }
 
-// Down tears down the active session and clears the auto-restore marker
-// (explicit user disconnect).
+// Down tears down the active session and clears the auto-connect marker
+// (explicit user disconnect — will not restore after reboot).
 func (d *Daemon) Down() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	_ = os.Remove(constants.WantedPath)
+	_ = clearWanted()
 	return d.downLocked()
 }
 
@@ -352,6 +352,9 @@ func (d *Daemon) statusLocked() ipc.StatusPayload {
 		Interface: constants.IfaceName,
 		UpdatedAt: time.Now().UTC(),
 	}
+	cfg := update.LoadConfig()
+	st.AutoConnect = cfg.AutoConnect
+	st.Wanted = readWanted()
 	if d.active == nil {
 		return st
 	}
@@ -462,18 +465,64 @@ func (d *Daemon) healLoop() {
 }
 
 func (d *Daemon) restoreWanted() {
-	data, err := os.ReadFile(constants.WantedPath)
-	if err != nil {
+	cfg := update.LoadConfig()
+	if !cfg.AutoConnect {
+		log.Printf("auto_connect disabled — skipping restore")
 		return
 	}
-	name := strings.TrimSpace(string(data))
+	name := readWanted()
 	if name == "" {
 		return
 	}
-	log.Printf("restoring wanted profile %q", name)
-	if err := d.Up(name); err != nil {
-		log.Printf("restore profile %q failed: %v", name, err)
+	// Brief delay so network-online / DNS are more likely ready after reboot.
+	select {
+	case <-d.stopCh:
+		return
+	case <-time.After(2 * time.Second):
 	}
+	log.Printf("auto-connecting profile %q", name)
+	if err := d.Up(name); err != nil {
+		log.Printf("auto-connect profile %q failed: %v", name, err)
+	}
+}
+
+func writeWanted(name string) error {
+	if err := os.MkdirAll(constants.ConfigDir, 0o700); err != nil {
+		return err
+	}
+	tmp := constants.WantedPath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(name+"\n"), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, constants.WantedPath); err != nil {
+		return err
+	}
+	_ = os.Remove(constants.LegacyWantedPath)
+	return nil
+}
+
+func clearWanted() error {
+	_ = os.Remove(constants.LegacyWantedPath)
+	return os.Remove(constants.WantedPath)
+}
+
+func readWanted() string {
+	for _, path := range []string{constants.WantedPath, constants.LegacyWantedPath} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		name := strings.TrimSpace(string(data))
+		if name == "" {
+			continue
+		}
+		// Migrate legacy /var/run marker to durable path.
+		if path == constants.LegacyWantedPath {
+			_ = writeWanted(name)
+		}
+		return name
+	}
+	return ""
 }
 
 func (d *Daemon) updateLoop() {

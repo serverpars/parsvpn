@@ -30,6 +30,8 @@ type StatusPayload struct {
 	Overrides   []string  `json:"overrides,omitempty"`
 	DNSOverride bool      `json:"dns_override,omitempty"`
 	DNSServers  []string  `json:"dns_servers,omitempty"`
+	AutoConnect bool      `json:"auto_connect,omitempty"`
+	Wanted      string    `json:"wanted_profile,omitempty"`
 	Userspace   bool      `json:"userspace,omitempty"`
 	Error       string    `json:"error,omitempty"`
 	UpdatedAt   time.Time `json:"updated_at,omitempty"`

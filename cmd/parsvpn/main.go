@@ -46,6 +46,7 @@ func main() {
 		cmdHost(),
 		cmdDNS(),
 		cmdSplit(),
+		cmdAutostart(),
 		cmdUpdate(),
 	)
 
@@ -121,12 +122,14 @@ func cmdStatus() *cobra.Command {
 			}
 			st := resp.Status
 			if !st.Active {
-				fmt.Println("status: inactive")
+				fmt.Printf("status: inactive\nautostart: %s wanted=%s\n",
+					boolOnOff(st.AutoConnect), orDash(st.Wanted))
 				return nil
 			}
-			fmt.Printf("status: active\nprofile: %s\ninterface: %s\naddress: %s\nendpoint: %s\nhandshake: %s\nrx: %d\ntx: %d\nsplit: %s\ndns: override=%s servers=%s\n",
+			fmt.Printf("status: active\nprofile: %s\ninterface: %s\naddress: %s\nendpoint: %s\nhandshake: %s\nrx: %d\ntx: %d\nsplit: %s\ndns: override=%s servers=%s\nautostart: %s wanted=%s\n",
 				st.Profile, st.Interface, st.Address, st.Endpoint, st.Handshake, st.RxBytes, st.TxBytes, strings.Join(st.SplitIPs, ", "),
-				boolOnOff(st.DNSOverride), dnsServersDisplay(st.DNSServers))
+				boolOnOff(st.DNSOverride), dnsServersDisplay(st.DNSServers),
+				boolOnOff(st.AutoConnect), orDash(st.Wanted))
 			return nil
 		},
 	}
@@ -543,6 +546,52 @@ func cmdSplit() *cobra.Command {
 	}
 	root.AddCommand(modeCmd, presetCmd)
 	return root
+}
+
+func cmdAutostart() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "autostart [on|off]",
+		Short: "Show or set whether the tunnel auto-connects after reboot",
+		Long: `Control auto-connect after reboot / daemon start (default: on).
+
+When enabled, ParsVPN restores the last profile brought up with "parsvpn up"
+(or the TUI). Explicit "parsvpn down" clears the saved profile so it will not
+reconnect until you connect again.
+
+  parsvpn autostart          # show current setting + wanted profile
+  sudo parsvpn autostart on  # enable (default)
+  sudo parsvpn autostart off # disable
+
+Also set "auto_connect": true|false in /etc/parsvpn/config.json.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := update.LoadConfig()
+			if len(args) == 1 {
+				on, err := parseOnOff(args[0])
+				if err != nil {
+					return err
+				}
+				cfg.AutoConnect = on
+				if err := update.SaveConfig(cfg); err != nil {
+					return err
+				}
+			}
+			wanted := "-"
+			if data, err := os.ReadFile(constants.WantedPath); err == nil {
+				if w := strings.TrimSpace(string(data)); w != "" {
+					wanted = w
+				}
+			}
+			fmt.Printf("autostart: %s\nwanted: %s\n", boolOnOff(cfg.AutoConnect), wanted)
+			if !cfg.AutoConnect {
+				fmt.Println("note: tunnel will not restore after reboot until autostart is on")
+			} else if wanted == "-" {
+				fmt.Println("note: connect once with 'parsvpn up <profile>' to set the wanted profile")
+			}
+			return nil
+		},
+	}
+	return c
 }
 
 func orDash(s string) string {

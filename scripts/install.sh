@@ -45,7 +45,8 @@ chmod 0700 /etc/parsvpn /etc/parsvpn/profiles /var/run/parsvpn
 if [[ ! -f /etc/parsvpn/config.json ]]; then
   cat >/etc/parsvpn/config.json <<'EOF'
 {
-  "auto_update": true
+  "auto_update": true,
+  "auto_connect": true
 }
 EOF
   chmod 0600 /etc/parsvpn/config.json
@@ -79,3 +80,4 @@ echo "  parsvpn up <name>"
 echo "  parsvpn   # interactive TUI"
 echo "  parsvpn update --check"
 echo "Autopilot updates are enabled (disable: parsvpn update --disable-auto)"
+echo "Auto-connect after reboot is enabled (disable: parsvpn autostart off)"

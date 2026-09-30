@@ -11,32 +11,58 @@ import (
 	"github.com/serverpars/parsvpn/internal/constants"
 )
 
-// Config controls release checking and autopilot updates.
+// Config controls daemon behavior stored in /etc/parsvpn/config.json.
 type Config struct {
 	// AutoUpdate applies newer releases automatically (daemon autopilot). Default true.
 	AutoUpdate bool `json:"auto_update"`
+	// AutoConnect restores the last active profile after reboot / daemon start. Default true.
+	AutoConnect bool `json:"auto_connect"`
 	// CheckIntervalSec overrides the daemon poll interval. 0 = default.
 	CheckIntervalSec int `json:"check_interval_sec,omitempty"`
 }
 
-// DefaultConfig enables autopilot updates.
+// fileConfig uses pointers so omitted JSON keys keep DefaultConfig values.
+type fileConfig struct {
+	AutoUpdate       *bool `json:"auto_update"`
+	AutoConnect      *bool `json:"auto_connect"`
+	CheckIntervalSec int   `json:"check_interval_sec,omitempty"`
+}
+
+// DefaultConfig enables autopilot updates and boot auto-connect.
 func DefaultConfig() Config {
-	return Config{AutoUpdate: true}
+	return Config{AutoUpdate: true, AutoConnect: true}
 }
 
 // LoadConfig reads /etc/parsvpn/config.json. Missing file → defaults.
-// PARSVPN_AUTO_UPDATE=0|false|off disables; =1|true|on enables.
+// PARSVPN_AUTO_UPDATE / PARSVPN_AUTO_CONNECT env vars override when set.
 func LoadConfig() Config {
 	cfg := DefaultConfig()
 	data, err := os.ReadFile(constants.ConfigPath)
 	if err == nil {
-		_ = json.Unmarshal(data, &cfg)
+		var f fileConfig
+		if json.Unmarshal(data, &f) == nil {
+			if f.AutoUpdate != nil {
+				cfg.AutoUpdate = *f.AutoUpdate
+			}
+			if f.AutoConnect != nil {
+				cfg.AutoConnect = *f.AutoConnect
+			}
+			if f.CheckIntervalSec > 0 {
+				cfg.CheckIntervalSec = f.CheckIntervalSec
+			}
+		}
 	}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("PARSVPN_AUTO_UPDATE"))) {
 	case "0", "false", "off", "no":
 		cfg.AutoUpdate = false
 	case "1", "true", "on", "yes":
 		cfg.AutoUpdate = true
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("PARSVPN_AUTO_CONNECT"))) {
+	case "0", "false", "off", "no":
+		cfg.AutoConnect = false
+	case "1", "true", "on", "yes":
+		cfg.AutoConnect = true
 	}
 	return cfg
 }

@@ -721,6 +721,15 @@ func (m model) viewBrowse() string {
 			servers = strings.Join(m.status.DNSServers, ",")
 		}
 		detail.WriteString(fmt.Sprintf("DNS: override=%s servers=%s\n", dnsState, servers))
+		auto := "off"
+		if m.status.AutoConnect {
+			auto = "on"
+		}
+		wanted := m.status.Wanted
+		if wanted == "" {
+			wanted = "-"
+		}
+		detail.WriteString(fmt.Sprintf("Autostart: %s wanted=%s\n", auto, wanted))
 		if len(m.status.Overrides) > 0 {
 			detail.WriteString("Host Overrides:\n")
 			for _, o := range m.status.Overrides {

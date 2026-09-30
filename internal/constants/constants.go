@@ -4,7 +4,7 @@ import "time"
 
 const (
 	AppName    = "parsvpn"
-	Version    = "1.4.1"
+	Version    = "1.5.0"
 	IfaceName  = "pv-tun0"
 	RouteTable = 51920
 	// FwMark is reserved for a future full-tunnel path; v1 uses destination-based rules only.
@@ -19,12 +19,15 @@ const (
 	ConfigDir   = "/etc/parsvpn"
 	ProfilesDir = "/etc/parsvpn/profiles"
 	ConfigPath  = "/etc/parsvpn/config.json"
-	RuntimeDir  = "/var/run/parsvpn"
-	SocketPath  = "/var/run/parsvpn/daemon.sock"
-	LockPath    = "/var/run/parsvpn/daemon.lock"
-	StatePath   = "/var/run/parsvpn/state.json"
-	WantedPath  = "/var/run/parsvpn/wanted_profile"
-	ResolvBak   = "/var/run/parsvpn/resolv.conf.bak"
+	// WantedPath is the durable auto-connect marker (survives reboot).
+	WantedPath = "/etc/parsvpn/wanted_profile"
+	// LegacyWantedPath was under /var/run (tmpfs) and is wiped on reboot.
+	LegacyWantedPath = "/var/run/parsvpn/wanted_profile"
+	RuntimeDir       = "/var/run/parsvpn"
+	SocketPath       = "/var/run/parsvpn/daemon.sock"
+	LockPath         = "/var/run/parsvpn/daemon.lock"
+	StatePath        = "/var/run/parsvpn/state.json"
+	ResolvBak        = "/var/run/parsvpn/resolv.conf.bak"
 
 	DNSListenAddr = "127.0.0.199:53"
 
