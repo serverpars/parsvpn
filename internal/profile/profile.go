@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/serverpars/parsvpn/internal/constants"
-	"github.com/serverpars/parsvpn/internal/geo"
+	"github.com/serverpars/parsvpn/internal/preset"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -80,7 +80,7 @@ func Path(name string) string {
 
 // EnsureDirs creates config/runtime directories with restrictive permissions.
 func EnsureDirs() error {
-	for _, dir := range []string{constants.ConfigDir, constants.ProfilesDir, constants.RuntimeDir} {
+	for _, dir := range []string{constants.ConfigDir, constants.ProfilesDir, constants.PresetsDir, constants.RuntimeDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
@@ -201,16 +201,16 @@ func (p *Profile) Normalize() error {
 		return fmt.Errorf("profile %q: invalid split_tunnel.mode %q (use include|exclude)", p.Name, p.SplitTunnel.Mode)
 	}
 	p.SplitTunnel.Mode = mode
-	preset := strings.ToLower(strings.TrimSpace(p.SplitTunnel.BypassPreset))
-	if preset == "none" {
-		preset = ""
+	bypassPreset := strings.ToLower(strings.TrimSpace(p.SplitTunnel.BypassPreset))
+	if bypassPreset == "none" {
+		bypassPreset = ""
 	}
-	p.SplitTunnel.BypassPreset = preset
-	if preset != "" {
-		if _, err := geo.PresetCIDRs(preset); err != nil {
-			return fmt.Errorf("profile %q: %w", p.Name, err)
+	p.SplitTunnel.BypassPreset = bypassPreset
+	if bypassPreset != "" {
+		if !preset.Exists(bypassPreset) {
+			return fmt.Errorf("profile %q: unknown bypass preset %q", p.Name, bypassPreset)
 		}
-		// Presets only apply in exclude mode — force it so "ir" actually bypasses.
+		// Presets only apply in exclude mode — force it so named lists actually bypass.
 		p.SplitTunnel.Mode = SplitModeExclude
 		mode = SplitModeExclude
 	}
@@ -266,8 +266,17 @@ func (p *Profile) DestinationCIDRs() []string {
 }
 
 // BypassCIDRs returns destinations that should stay on the main table (exclude mode).
-// Merges bypass_preset with explicit ip_ranges.
+// Merges bypass_preset with explicit ip_ranges. Hostnames in custom presets are
+// skipped here; use BypassCIDRsResolved when connecting so they can be looked up.
 func (p *Profile) BypassCIDRs() ([]string, error) {
+	return p.BypassCIDRsResolved(nil)
+}
+
+// HostResolveFunc resolves hostnames while expanding custom presets.
+type HostResolveFunc = preset.HostResolveFunc
+
+// BypassCIDRsResolved is like BypassCIDRs but resolves preset hostnames when resolve != nil.
+func (p *Profile) BypassCIDRsResolved(resolve HostResolveFunc) ([]string, error) {
 	if p.EffectiveMode() != SplitModeExclude {
 		return nil, nil
 	}
@@ -287,11 +296,11 @@ func (p *Profile) BypassCIDRs() ([]string, error) {
 		}
 	}
 	if p.SplitTunnel.BypassPreset != "" {
-		preset, err := geo.PresetCIDRs(p.SplitTunnel.BypassPreset)
+		presetCIDRs, err := preset.ExpandCIDRs(p.SplitTunnel.BypassPreset, resolve)
 		if err != nil {
 			return nil, err
 		}
-		add(preset)
+		add(presetCIDRs)
 	}
 	add(p.SplitTunnel.IPRanges)
 	return out, nil
@@ -509,15 +518,15 @@ func (p *Profile) SetSplitMode(mode string) error {
 	return nil
 }
 
-// SetBypassPreset sets ir|none|"". Non-empty presets switch mode to exclude.
+// SetBypassPreset sets ir|none|custom|"". Non-empty presets switch mode to exclude.
 func (p *Profile) SetBypassPreset(name string) error {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "none" {
 		name = ""
 	}
 	if name != "" {
-		if _, err := geo.PresetCIDRs(name); err != nil {
-			return err
+		if !preset.Exists(name) {
+			return fmt.Errorf("unknown bypass preset %q (builtins: ir, none — create custom with: parsvpn preset new %s)", name, name)
 		}
 		p.SplitTunnel.Mode = SplitModeExclude
 	}

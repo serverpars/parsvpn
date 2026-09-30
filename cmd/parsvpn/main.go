@@ -13,6 +13,7 @@ import (
 	"github.com/serverpars/parsvpn/internal/daemon"
 	"github.com/serverpars/parsvpn/internal/hostpin"
 	"github.com/serverpars/parsvpn/internal/ipc"
+	"github.com/serverpars/parsvpn/internal/preset"
 	"github.com/serverpars/parsvpn/internal/profile"
 	"github.com/serverpars/parsvpn/internal/tui"
 	"github.com/serverpars/parsvpn/internal/update"
@@ -46,7 +47,9 @@ func main() {
 		cmdHost(),
 		cmdDNS(),
 		cmdSplit(),
+		cmdPreset(),
 		cmdAutostart(),
+		cmdTraffic(),
 		cmdUpdate(),
 	)
 
@@ -122,14 +125,14 @@ func cmdStatus() *cobra.Command {
 			}
 			st := resp.Status
 			if !st.Active {
-				fmt.Printf("status: inactive\nautostart: %s wanted=%s\n",
-					boolOnOff(st.AutoConnect), orDash(st.Wanted))
+				fmt.Printf("status: inactive\nautostart: %s\nreconnects as: %s\n",
+					boolOnOff(st.AutoConnect), orDash(st.AutostartProfile))
 				return nil
 			}
-			fmt.Printf("status: active\nprofile: %s\ninterface: %s\naddress: %s\nendpoint: %s\nhandshake: %s\nrx: %d\ntx: %d\nsplit: %s\ndns: override=%s servers=%s\nautostart: %s wanted=%s\n",
+			fmt.Printf("status: active\nprofile: %s\ninterface: %s\naddress: %s\nendpoint: %s\nhandshake: %s\nrx: %d\ntx: %d\nsplit: %s\ndns: override=%s servers=%s\nautostart: %s\nreconnects as: %s\n",
 				st.Profile, st.Interface, st.Address, st.Endpoint, st.Handshake, st.RxBytes, st.TxBytes, strings.Join(st.SplitIPs, ", "),
 				boolOnOff(st.DNSOverride), dnsServersDisplay(st.DNSServers),
-				boolOnOff(st.AutoConnect), orDash(st.Wanted))
+				boolOnOff(st.AutoConnect), orDash(st.AutostartProfile))
 			return nil
 		},
 	}
@@ -547,8 +550,8 @@ func cmdSplit() *cobra.Command {
 		},
 	}
 	presetCmd := &cobra.Command{
-		Use:   "preset <profile> <ir|none>",
-		Short: "Set exclude-mode bypass preset (ir also enables exclude mode)",
+		Use:   "preset <profile> <name|ir|none>",
+		Short: "Set exclude-mode bypass preset (builtin ir or a custom preset name)",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := profile.Load(args[0])
@@ -569,17 +572,226 @@ func cmdSplit() *cobra.Command {
 	return root
 }
 
+func cmdPreset() *cobra.Command {
+	root := &cobra.Command{
+		Use:   "preset",
+		Short: "Manage custom bypass presets (lists of IPs, CIDRs, and hosts)",
+		Long: `Custom presets live in /etc/parsvpn/presets/<name>.json.
+
+Built-in: ir (Iran IPv4), none.
+Apply to a profile with: sudo parsvpn split preset <profile> <name>`,
+	}
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List builtin and custom presets",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Println("builtin:")
+			for _, n := range preset.BuiltinNames() {
+				fmt.Println("  " + n)
+			}
+			names, err := preset.List()
+			if err != nil {
+				return err
+			}
+			fmt.Println("custom:")
+			if len(names) == 0 {
+				fmt.Println("  (none)")
+				return nil
+			}
+			for _, n := range names {
+				fmt.Println("  " + n)
+			}
+			return nil
+		},
+	}
+	showCmd := &cobra.Command{
+		Use:   "show <name>",
+		Short: "Show preset entries",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := strings.ToLower(args[0])
+			if name == "ir" || name == "none" {
+				cidrs, err := preset.ExpandCIDRs(name, nil)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("preset: %s (builtin)\nentries: %d CIDRs\n", name, len(cidrs))
+				return nil
+			}
+			p, err := preset.Load(name)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("preset: %s\n", p.Name)
+			if p.Description != "" {
+				fmt.Printf("description: %s\n", p.Description)
+			}
+			if len(p.Entries) == 0 {
+				fmt.Println("(empty)")
+				return nil
+			}
+			for _, e := range p.Entries {
+				fmt.Println(e)
+			}
+			return nil
+		},
+	}
+	var desc string
+	newCmd := &cobra.Command{
+		Use:   "new <name>",
+		Short: "Create an empty custom preset",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := preset.NewEmpty(args[0], desc)
+			if err != nil {
+				return err
+			}
+			if _, err := os.Stat(preset.Path(p.Name)); err == nil {
+				return fmt.Errorf("preset %q already exists", p.Name)
+			}
+			if err := preset.Save(p); err != nil {
+				return err
+			}
+			fmt.Printf("created preset %s\n", p.Name)
+			return nil
+		},
+	}
+	newCmd.Flags().StringVar(&desc, "desc", "", "optional description")
+	addCmd := &cobra.Command{
+		Use:   "add <name> <cidr|ip|host> [entry...]",
+		Short: "Add IPs, CIDRs, or hostnames to a custom preset",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := preset.Load(args[0])
+			if err != nil {
+				return err
+			}
+			if err := p.Add(args[1:]...); err != nil {
+				return err
+			}
+			if err := preset.Save(p); err != nil {
+				return err
+			}
+			fmt.Printf("preset %s: %d entries\n", p.Name, len(p.Entries))
+			return nil
+		},
+	}
+	rmCmd := &cobra.Command{
+		Use:   "rm <name> <cidr|ip|host> [entry...]",
+		Short: "Remove entries from a custom preset",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := preset.Load(args[0])
+			if err != nil {
+				return err
+			}
+			if err := p.Remove(args[1:]...); err != nil {
+				return err
+			}
+			if err := preset.Save(p); err != nil {
+				return err
+			}
+			fmt.Printf("preset %s: %d entries\n", p.Name, len(p.Entries))
+			return nil
+		},
+	}
+	deleteCmd := &cobra.Command{
+		Use:   "delete <name>",
+		Short: "Delete a custom preset",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := preset.Delete(args[0]); err != nil {
+				return err
+			}
+			fmt.Printf("deleted preset %s\n", args[0])
+			return nil
+		},
+	}
+	root.AddCommand(listCmd, showCmd, newCmd, addCmd, rmCmd, deleteCmd)
+	return root
+}
+
+func cmdTraffic() *cobra.Command {
+	var follow bool
+	var limit int
+	var clear bool
+	c := &cobra.Command{
+		Use:   "traffic",
+		Short: "Show recent tunnel DNS/packet samples (debug)",
+		Long: `Snapshot of recent DNS queries and packets observed on pv-tun0.
+
+Requires an active tunnel (packet samples) and/or DNS override / host pins
+(DNS samples). Use the TUI [t] key for a live debug window.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if clear {
+				resp, err := ipc.Call(ipc.Request{Cmd: "traffic-clear"})
+				if err != nil {
+					return err
+				}
+				if !resp.OK {
+					return fmt.Errorf("%s", resp.Error)
+				}
+				fmt.Println("traffic log cleared")
+				return nil
+			}
+			printOnce := func() error {
+				resp, err := ipc.Call(ipc.Request{Cmd: "traffic", Limit: limit})
+				if err != nil {
+					return err
+				}
+				if !resp.OK {
+					return fmt.Errorf("%s", resp.Error)
+				}
+				if follow {
+					fmt.Print("\033[H\033[2J")
+				}
+				if len(resp.Flows) == 0 {
+					fmt.Println("(no traffic samples yet — generate DNS/traffic through the tunnel)")
+					return nil
+				}
+				for _, f := range resp.Flows {
+					ts := f.Time.Local().Format("15:04:05")
+					switch f.Kind {
+					case "dns":
+						fmt.Printf("%s  DNS  %-24s → %-16s %s\n", ts, f.Domain, f.Dst, f.Detail)
+					default:
+						dom := f.Domain
+						if dom == "" {
+							dom = "-"
+						}
+						fmt.Printf("%s  %-4s %-18s → %-18s %-24s %dB\n", ts, f.Proto, f.Src, f.Dst, dom, f.Bytes)
+					}
+				}
+				return nil
+			}
+			if !follow {
+				return printOnce()
+			}
+			for {
+				if err := printOnce(); err != nil {
+					return err
+				}
+				time.Sleep(time.Second)
+			}
+		},
+	}
+	c.Flags().BoolVarP(&follow, "follow", "f", false, "refresh every second")
+	c.Flags().IntVarP(&limit, "limit", "n", 60, "max events to show")
+	c.Flags().BoolVar(&clear, "clear", false, "clear the traffic ring buffer")
+	return c
+}
+
 func cmdAutostart() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "autostart [on|off]",
 		Short: "Show or set whether the tunnel auto-connects after reboot",
 		Long: `Control auto-connect after reboot / daemon start (default: on).
 
-When enabled, ParsVPN restores the last profile brought up with "parsvpn up"
-(or the TUI). Explicit "parsvpn down" clears the saved profile so it will not
-reconnect until you connect again.
+When enabled, ParsVPN reconnects the last profile brought up with "parsvpn up"
+(or the TUI). Explicit "parsvpn down" clears that so it will not reconnect
+until you connect again.
 
-  parsvpn autostart          # show current setting + wanted profile
+  parsvpn autostart          # show setting + which profile reconnects
   sudo parsvpn autostart on  # enable (default)
   sudo parsvpn autostart off # disable
 
@@ -597,17 +809,17 @@ Also set "auto_connect": true|false in /etc/parsvpn/config.json.`,
 					return err
 				}
 			}
-			wanted := "-"
+			profileName := "-"
 			if data, err := os.ReadFile(constants.WantedPath); err == nil {
 				if w := strings.TrimSpace(string(data)); w != "" {
-					wanted = w
+					profileName = w
 				}
 			}
-			fmt.Printf("autostart: %s\nwanted: %s\n", boolOnOff(cfg.AutoConnect), wanted)
+			fmt.Printf("autostart: %s\nreconnects as: %s\n", boolOnOff(cfg.AutoConnect), profileName)
 			if !cfg.AutoConnect {
 				fmt.Println("note: tunnel will not restore after reboot until autostart is on")
-			} else if wanted == "-" {
-				fmt.Println("note: connect once with 'parsvpn up <profile>' to set the wanted profile")
+			} else if profileName == "-" {
+				fmt.Println("note: connect once with 'parsvpn up <profile>' to choose which profile reconnects")
 			}
 			return nil
 		},

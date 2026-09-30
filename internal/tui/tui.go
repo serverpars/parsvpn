@@ -46,6 +46,7 @@ const (
 	modeEditHostAdd
 	modeEditSplit
 	modeEditDNS
+	modeTraffic
 )
 
 type addSource int
@@ -91,6 +92,7 @@ type model struct {
 	editProfile   string
 	editList      list.Model
 	hostAlsoWWW   bool
+	trafficLines  []string
 }
 
 type tickMsg struct{}
@@ -117,6 +119,11 @@ type updateAvailableMsg struct {
 type updateAppliedMsg struct {
 	version string
 	err     error
+}
+
+type trafficMsg struct {
+	lines []string
+	err   error
 }
 
 func Run() error {
@@ -254,14 +261,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeBrowse {
 			return m, tea.Batch(refreshStatus, scheduleTick())
 		}
+		if m.mode == modeTraffic {
+			return m, tea.Batch(refreshTraffic, scheduleTick())
+		}
 		return m, scheduleTick()
-	case statusMsg:
+	case trafficMsg:
 		if msg.err != nil {
 			m.err = msg.err.Error()
 		} else {
 			m.err = ""
-			m.status = msg.st
-			m.syncActiveFlags()
+			m.trafficLines = msg.lines
 		}
 	case profilesMsg:
 		if msg.err != nil {
@@ -351,6 +360,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateEditSplit(msg)
 		case modeEditDNS:
 			return m.updateEditDNS(msg)
+		case modeTraffic:
+			return m.updateTraffic(msg)
 		default:
 			return m.updateBrowse(msg)
 		}
@@ -437,6 +448,11 @@ func (m model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "e":
 		next, cmd := m.beginEdit()
 		return next, cmd
+	case "t":
+		m.mode = modeTraffic
+		m.err = ""
+		m.notice = ""
+		return m, refreshTraffic
 	}
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
@@ -688,9 +704,77 @@ func (m model) View() string {
 		return m.viewEditSplit()
 	case modeEditDNS:
 		return m.viewEditDNS()
+	case modeTraffic:
+		return m.viewTraffic()
 	default:
 		return m.viewBrowse()
 	}
+}
+
+func (m model) updateTraffic(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.mode = modeBrowse
+		m.err = ""
+		return m, refreshStatus
+	case "ctrl+c":
+		return m, tea.Quit
+	case "c":
+		return m, clearTraffic
+	case "r":
+		return m, refreshTraffic
+	}
+	return m, nil
+}
+
+func (m model) viewTraffic() string {
+	header := titleStyle.Render("Traffic debug — pv-tun0 / DNS")
+	body := strings.Join(m.trafficLines, "\n")
+	if body == "" {
+		body = "(no samples yet — browse through the tunnel or enable DNS override)"
+	}
+	var errLine string
+	if m.err != "" {
+		errLine = "\nError: " + m.err + "\n"
+	}
+	help := helpStyle.Render("[r] Refresh  [c] Clear  [esc] Back")
+	return header + "\n\n" + body + errLine + "\n\n" + help
+}
+
+func refreshTraffic() tea.Msg {
+	resp, err := ipc.Call(ipc.Request{Cmd: "traffic", Limit: 40})
+	if err != nil {
+		return trafficMsg{err: err}
+	}
+	if !resp.OK {
+		return trafficMsg{err: fmt.Errorf("%s", resp.Error)}
+	}
+	lines := make([]string, 0, len(resp.Flows))
+	for _, f := range resp.Flows {
+		ts := f.Time.Local().Format("15:04:05")
+		switch f.Kind {
+		case "dns":
+			lines = append(lines, fmt.Sprintf("%s  DNS  %-22s → %-15s %s", ts, f.Domain, f.Dst, f.Detail))
+		default:
+			dom := f.Domain
+			if dom == "" {
+				dom = "-"
+			}
+			lines = append(lines, fmt.Sprintf("%s  %-4s %-16s → %-16s %-20s %dB", ts, f.Proto, f.Src, f.Dst, dom, f.Bytes))
+		}
+	}
+	return trafficMsg{lines: lines}
+}
+
+func clearTraffic() tea.Msg {
+	resp, err := ipc.Call(ipc.Request{Cmd: "traffic-clear"})
+	if err != nil {
+		return trafficMsg{err: err}
+	}
+	if !resp.OK {
+		return trafficMsg{err: fmt.Errorf("%s", resp.Error)}
+	}
+	return trafficMsg{lines: nil}
 }
 
 func (m model) viewBrowse() string {
@@ -726,11 +810,11 @@ func (m model) viewBrowse() string {
 		if m.status.AutoConnect {
 			auto = "on"
 		}
-		wanted := m.status.Wanted
+		wanted := m.status.AutostartProfile
 		if wanted == "" {
 			wanted = "-"
 		}
-		detail.WriteString(fmt.Sprintf("Autostart: %s wanted=%s\n", auto, wanted))
+		detail.WriteString(fmt.Sprintf("Autostart: %s (reconnects as %s)\n", auto, wanted))
 		if len(m.status.Overrides) > 0 {
 			detail.WriteString("Host Overrides:\n")
 			for _, o := range m.status.Overrides {
@@ -754,7 +838,7 @@ func (m model) viewBrowse() string {
 	}
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, m.list.View(), detailStyle.Render(detail.String()))
-	help := helpStyle.Render("[Space] Toggle  [a] Add  [e] Edit  [d] Delete  [u] Update  [r] Refresh  [q] Quit")
+	help := helpStyle.Render("[Space] Toggle  [a] Add  [e] Edit  [t] Traffic  [d] Delete  [u] Update  [r] Refresh  [q] Quit")
 	return header + "\n\n" + body + "\n\n" + help
 }
 

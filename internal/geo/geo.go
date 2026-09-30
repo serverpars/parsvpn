@@ -36,7 +36,7 @@ func errUnknownPreset(name string) error {
 type unknownPresetError struct{ name string }
 
 func (e *unknownPresetError) Error() string {
-	return "unknown bypass preset " + e.name + " (supported: ir, none)"
+	return "unknown bypass preset " + e.name + " (builtins: ir, none)"
 }
 
 func iranIPv4() ([]string, error) {

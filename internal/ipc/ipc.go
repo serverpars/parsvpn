@@ -14,27 +14,40 @@ import (
 type Request struct {
 	Cmd     string `json:"cmd"`
 	Profile string `json:"profile,omitempty"`
+	Limit   int    `json:"limit,omitempty"`
+}
+
+// FlowEvent is a recent DNS or tunnel packet sample for debug.
+type FlowEvent struct {
+	Time   time.Time `json:"time"`
+	Kind   string    `json:"kind"`
+	Proto  string    `json:"proto,omitempty"`
+	Src    string    `json:"src,omitempty"`
+	Dst    string    `json:"dst,omitempty"`
+	Domain string    `json:"domain,omitempty"`
+	Bytes  int       `json:"bytes,omitempty"`
+	Detail string    `json:"detail,omitempty"`
 }
 
 // StatusPayload is returned by status / after up.
 type StatusPayload struct {
-	Active      bool      `json:"active"`
-	Profile     string    `json:"profile,omitempty"`
-	Interface   string    `json:"interface,omitempty"`
-	Endpoint    string    `json:"endpoint,omitempty"`
-	Address     string    `json:"address,omitempty"`
-	Handshake   string    `json:"handshake,omitempty"`
-	RxBytes     int64     `json:"rx_bytes"`
-	TxBytes     int64     `json:"tx_bytes"`
-	SplitIPs    []string  `json:"split_ips,omitempty"`
-	Overrides   []string  `json:"overrides,omitempty"`
-	DNSOverride bool      `json:"dns_override,omitempty"`
-	DNSServers  []string  `json:"dns_servers,omitempty"`
-	AutoConnect bool      `json:"auto_connect,omitempty"`
-	Wanted      string    `json:"wanted_profile,omitempty"`
-	Userspace   bool      `json:"userspace,omitempty"`
-	Error       string    `json:"error,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+	Active           bool      `json:"active"`
+	Profile          string    `json:"profile,omitempty"`
+	Interface        string    `json:"interface,omitempty"`
+	Endpoint         string    `json:"endpoint,omitempty"`
+	Address          string    `json:"address,omitempty"`
+	Handshake        string    `json:"handshake,omitempty"`
+	RxBytes          int64     `json:"rx_bytes"`
+	TxBytes          int64     `json:"tx_bytes"`
+	SplitIPs         []string  `json:"split_ips,omitempty"`
+	Overrides        []string  `json:"overrides,omitempty"`
+	DNSOverride      bool      `json:"dns_override,omitempty"`
+	DNSServers       []string  `json:"dns_servers,omitempty"`
+	AutoConnect      bool      `json:"auto_connect,omitempty"`
+	AutostartProfile string    `json:"autostart_profile,omitempty"`
+	Userspace        bool      `json:"userspace,omitempty"`
+	Error            string    `json:"error,omitempty"`
+	UpdatedAt        time.Time `json:"updated_at,omitempty"`
 }
 
 // Response wraps command results.
@@ -42,6 +55,7 @@ type Response struct {
 	OK     bool           `json:"ok"`
 	Error  string         `json:"error,omitempty"`
 	Status *StatusPayload `json:"status,omitempty"`
+	Flows  []FlowEvent    `json:"flows,omitempty"`
 }
 
 // Dial connects to the daemon socket.

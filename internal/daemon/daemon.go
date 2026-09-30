@@ -15,8 +15,10 @@ import (
 
 	"github.com/serverpars/parsvpn/internal/constants"
 	"github.com/serverpars/parsvpn/internal/dnseng"
+	"github.com/serverpars/parsvpn/internal/flowlog"
 	"github.com/serverpars/parsvpn/internal/ipc"
 	"github.com/serverpars/parsvpn/internal/neteng"
+	"github.com/serverpars/parsvpn/internal/preset"
 	"github.com/serverpars/parsvpn/internal/profile"
 	"github.com/serverpars/parsvpn/internal/update"
 	"github.com/serverpars/parsvpn/internal/wg"
@@ -86,6 +88,7 @@ func (d *Daemon) Run() error {
 	go d.healLoop()
 	go d.updateLoop()
 	go d.restoreWanted()
+	_ = flowlog.StartSampler(d.stopCh)
 
 	log.Printf("parsvpn daemon listening on %s", constants.SocketPath)
 	for {
@@ -141,6 +144,24 @@ func (d *Daemon) dispatch(req ipc.Request) ipc.Response {
 		}
 		st := d.Status()
 		return ipc.Response{OK: true, Status: &st}
+	case "traffic":
+		n := req.Limit
+		if n <= 0 {
+			n = 80
+		}
+		evs := flowlog.Default.Snapshot(n)
+		flows := make([]ipc.FlowEvent, 0, len(evs))
+		for _, e := range evs {
+			flows = append(flows, ipc.FlowEvent{
+				Time: e.Time, Kind: e.Kind, Proto: e.Proto,
+				Src: e.Src, Dst: e.Dst, Domain: e.Domain,
+				Bytes: e.Bytes, Detail: e.Detail,
+			})
+		}
+		return ipc.Response{OK: true, Flows: flows}
+	case "traffic-clear":
+		flowlog.Default.Clear()
+		return ipc.Response{OK: true}
 	case "ping":
 		return ipc.Response{OK: true}
 	default:
@@ -220,7 +241,13 @@ func (d *Daemon) Up(name string) error {
 func (d *Daemon) applyRoutesLocked(p *profile.Profile) error {
 	switch p.EffectiveMode() {
 	case profile.SplitModeExclude:
-		bypass, err := p.BypassCIDRs()
+		bypass, err := p.BypassCIDRsResolved(func(host string) ([]net.IP, error) {
+			ip, err := dnseng.LookupA(host, p.UpstreamDNSHost(), 5*time.Second)
+			if err != nil {
+				return nil, err
+			}
+			return []net.IP{ip}, nil
+		})
 		if err != nil {
 			return err
 		}
@@ -257,16 +284,50 @@ func (d *Daemon) startDNSLocked(p *profile.Profile) error {
 		_ = d.dns.Stop()
 		d.dns = nil
 	}
-	if !p.NeedsDNSProxy() {
+	overrides := d.effectiveHostOverrides(p)
+	if !p.OverrideSystemDNS && len(overrides) == 0 {
 		return nil
 	}
 	adapter := dnseng.DetectAdapter()
-	proxy := dnseng.NewProxy(p.SplitTunnel.HostOverrides, firstDNS(p), adapter, p.OverrideSystemDNS)
+	proxy := dnseng.NewProxy(overrides, firstDNS(p), adapter, p.OverrideSystemDNS)
 	if err := proxy.Start(); err != nil {
 		return err
 	}
 	d.dns = proxy
 	return nil
+}
+
+func (d *Daemon) effectiveHostOverrides(p *profile.Profile) []profile.HostOverride {
+	out := append([]profile.HostOverride(nil), p.SplitTunnel.HostOverrides...)
+	name := strings.ToLower(strings.TrimSpace(p.SplitTunnel.BypassPreset))
+	if name == "" || name == "ir" || name == "none" {
+		return out
+	}
+	pr, err := preset.Load(name)
+	if err != nil {
+		return out
+	}
+	dnsHost := p.UpstreamDNSHost()
+	seen := map[string]struct{}{}
+	for _, o := range out {
+		seen[strings.ToLower(o.Domain)] = struct{}{}
+	}
+	for _, h := range pr.HostEntries() {
+		key := strings.ToLower(h)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		lookup := profile.HostLookupName(h)
+		ip, err := dnseng.LookupA(lookup, dnsHost, 5*time.Second)
+		if err != nil {
+			log.Printf("preset %q host %q resolve: %v", name, h, err)
+			continue
+		}
+		out = append(out, profile.HostOverride{Domain: h, IP: ip.String()})
+		seen[key] = struct{}{}
+		flowlog.Default.RememberIP(ip.String(), profile.HostLookupName(h))
+	}
+	return out
 }
 
 // Reload re-reads the active profile from disk and re-applies routes + DNS
@@ -354,7 +415,7 @@ func (d *Daemon) statusLocked() ipc.StatusPayload {
 	}
 	cfg := update.LoadConfig()
 	st.AutoConnect = cfg.AutoConnect
-	st.Wanted = readWanted()
+	st.AutostartProfile = readWanted()
 	if d.active == nil {
 		return st
 	}

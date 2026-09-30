@@ -39,8 +39,8 @@ else
 fi
 
 install -m 0755 "${src}" "${INSTALL_BIN}"
-mkdir -p /etc/parsvpn/profiles /var/run/parsvpn
-chmod 0700 /etc/parsvpn /etc/parsvpn/profiles /var/run/parsvpn
+mkdir -p /etc/parsvpn/profiles /etc/parsvpn/presets /var/run/parsvpn
+chmod 0700 /etc/parsvpn /etc/parsvpn/profiles /etc/parsvpn/presets /var/run/parsvpn
 
 if [[ ! -f /etc/parsvpn/config.json ]]; then
   cat >/etc/parsvpn/config.json <<'EOF'

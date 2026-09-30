@@ -47,7 +47,7 @@ parsvpn status --json
 sudo parsvpn down
 
 # Auto-connect after reboot (default: on). Explicit down clears the saved profile.
-parsvpn autostart
+parsvpn autostart                 # shows: autostart on/off + which profile reconnects
 sudo parsvpn autostart off
 sudo parsvpn autostart on
 
@@ -85,6 +85,19 @@ sudo parsvpn dns override office off
 # Tunnel everything except Iran (preset enables exclude mode)
 sudo parsvpn split preset office ir
 sudo parsvpn up office
+
+# Custom bypass presets (IPs, CIDRs, hosts) — stored in /etc/parsvpn/presets/
+sudo parsvpn preset new office-net
+sudo parsvpn preset add office-net 10.0.0.0/8 1.2.3.4 intranet.local '*.corp.example'
+parsvpn preset show office-net
+sudo parsvpn split preset office office-net   # apply to profile (exclude mode)
+sudo parsvpn preset rm office-net 1.2.3.4
+sudo parsvpn preset delete office-net
+
+# Live traffic debug (DNS queries + packets on pv-tun0)
+parsvpn traffic
+parsvpn traffic -f            # follow
+# TUI: press [t]
 
 # Back to classic split-tunnel (only listed CIDRs via VPN)
 sudo parsvpn split mode office include

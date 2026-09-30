@@ -9,6 +9,7 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/serverpars/parsvpn/internal/constants"
+	"github.com/serverpars/parsvpn/internal/flowlog"
 	"github.com/serverpars/parsvpn/internal/profile"
 )
 
@@ -132,6 +133,10 @@ func (p *Proxy) handle(w dns.ResponseWriter, r *dns.Msg) {
 				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
 				A:   ip4,
 			})
+			flowlog.Default.RememberIP(ip4.String(), name)
+			flowlog.Default.Add(flowlog.Event{
+				Kind: "dns", Proto: "udp", Domain: name, Dst: ip4.String(), Detail: "override A",
+			})
 			_ = w.WriteMsg(m)
 			return
 		}
@@ -139,6 +144,10 @@ func (p *Proxy) handle(w dns.ResponseWriter, r *dns.Msg) {
 			m.Answer = append(m.Answer, &dns.AAAA{
 				Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 30},
 				AAAA: ip,
+			})
+			flowlog.Default.RememberIP(ip.String(), name)
+			flowlog.Default.Add(flowlog.Event{
+				Kind: "dns", Proto: "udp", Domain: name, Dst: ip.String(), Detail: "override AAAA",
 			})
 			_ = w.WriteMsg(m)
 			return
@@ -149,9 +158,49 @@ func (p *Proxy) handle(w dns.ResponseWriter, r *dns.Msg) {
 	c := new(dns.Client)
 	in, _, err := c.Exchange(r, p.upstream)
 	if err != nil || in == nil {
+		flowlog.Default.Add(flowlog.Event{
+			Kind:   "dns",
+			Proto:  "udp",
+			Domain: name,
+			Detail: "SERVFAIL",
+		})
 		m.Rcode = dns.RcodeServerFailure
 		_ = w.WriteMsg(m)
 		return
+	}
+	// Log answers and remember IP→domain for traffic debug.
+	detail := dns.RcodeToString[in.Rcode]
+	for _, rr := range in.Answer {
+		switch a := rr.(type) {
+		case *dns.A:
+			ip := a.A.String()
+			flowlog.Default.RememberIP(ip, name)
+			flowlog.Default.Add(flowlog.Event{
+				Kind:   "dns",
+				Proto:  "udp",
+				Domain: name,
+				Dst:    ip,
+				Detail: "A " + detail,
+			})
+		case *dns.AAAA:
+			ip := a.AAAA.String()
+			flowlog.Default.RememberIP(ip, name)
+			flowlog.Default.Add(flowlog.Event{
+				Kind:   "dns",
+				Proto:  "udp",
+				Domain: name,
+				Dst:    ip,
+				Detail: "AAAA " + detail,
+			})
+		}
+	}
+	if len(in.Answer) == 0 {
+		flowlog.Default.Add(flowlog.Event{
+			Kind:   "dns",
+			Proto:  "udp",
+			Domain: name,
+			Detail: detail,
+		})
 	}
 	_ = w.WriteMsg(in)
 }

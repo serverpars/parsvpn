@@ -4,7 +4,7 @@ import "time"
 
 const (
 	AppName    = "parsvpn"
-	Version    = "1.5.1"
+	Version    = "1.6.0"
 	IfaceName  = "pv-tun0"
 	RouteTable = 51920
 	// FwMark is reserved for a future full-tunnel path; v1 uses destination-based rules only.
@@ -18,6 +18,7 @@ const (
 
 	ConfigDir   = "/etc/parsvpn"
 	ProfilesDir = "/etc/parsvpn/profiles"
+	PresetsDir  = "/etc/parsvpn/presets"
 	ConfigPath  = "/etc/parsvpn/config.json"
 	// WantedPath is the durable auto-connect marker (survives reboot).
 	WantedPath = "/etc/parsvpn/wanted_profile"
