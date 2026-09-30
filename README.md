@@ -5,8 +5,9 @@ Standalone, Linux-only WireGuard VPN client for ServerPars. Single static binary
 ## Design goals
 
 - Coexist with `wg-quick`, OpenVPN, Tailscale, WARP, StrongSwan
-- Isolated interface `pv-tun0`, routing table `51920`, rule priorities `15190–15199`
+- Isolated interface `pv-tun0`, routing table `51920`, rule priorities `14000–16999`
 - Split-tunnel by destination CIDR (never steals the default route by default)
+- Optional exclude mode: tunnel all traffic except bypass CIDRs (e.g. Iran)
 - Optional host overrides via embedded DNS on `127.0.0.199:53`
 - Static ELF (`CGO_ENABLED=0`) for CentOS 7 / AlmaLinux 8–9 / Ubuntu 20.04+
 
@@ -53,6 +54,31 @@ sudo parsvpn update
 sudo parsvpn update --disable-auto   # opt out of autopilot
 ```
 
+### Routes, hosts, and split mode
+
+```bash
+# List / add / remove split IP ranges (include: via tunnel; exclude: bypass)
+parsvpn route list office
+sudo parsvpn route add office 10.10.0.0/16 203.0.113.0/24
+sudo parsvpn route rm office 203.0.113.0/24
+
+# DNS host overrides (embedded resolver)
+parsvpn host list office
+sudo parsvpn host add office db.internal 10.10.0.50
+sudo parsvpn host rm office db.internal
+
+# Tunnel everything except Iran (and any extra bypass CIDRs in ip_ranges)
+sudo parsvpn split mode office exclude
+sudo parsvpn split preset office ir
+sudo parsvpn up office
+
+# Back to classic split-tunnel (only listed CIDRs via VPN)
+sudo parsvpn split mode office include
+sudo parsvpn split preset office none
+```
+
+If the profile is active, route/host/split changes are saved and the daemon reloads automatically.
+
 Daemon (started by systemd):
 
 ```bash
@@ -61,7 +87,7 @@ sudo systemctl status parsvpn
 
 ## Profile JSON
 
-Profiles live in `/etc/parsvpn/profiles/<name>.json` (`0600`). Importing a `.conf` fills `split_tunnel.ip_ranges` from peer `AllowedIPs`, dropping `0.0.0.0/0` and `::/0` so v1 stays split-only.
+Profiles live in `/etc/parsvpn/profiles/<name>.json` (`0600`). Importing a `.conf` fills `split_tunnel.ip_ranges` from peer `AllowedIPs`, dropping `0.0.0.0/0` and `::/0` so include-mode stays split-only.
 
 ```json
 {
@@ -77,6 +103,8 @@ Profiles live in `/etc/parsvpn/profiles/<name>.json` (`0600`). Importing a `.con
     }
   ],
   "split_tunnel": {
+    "mode": "include",
+    "bypass_preset": "",
     "ip_ranges": ["10.10.0.0/16"],
     "host_overrides": [
       {"domain": "db.internal", "ip": "10.10.0.50"}
@@ -85,13 +113,16 @@ Profiles live in `/etc/parsvpn/profiles/<name>.json` (`0600`). Importing a `.con
 }
 ```
 
+- `mode: "include"` (default): `ip_ranges` go through the tunnel.
+- `mode: "exclude"`: everything goes through the tunnel except `ip_ranges` plus `bypass_preset` (e.g. `"ir"` for Iran IPv4). WireGuard AllowedIPs are forced to include `0.0.0.0/0`; the peer endpoint is always bypassed.
+
 ## Isolation map
 
 | Component | Value |
 |-----------|--------|
 | Interface | `pv-tun0` |
 | Table | `51920` |
-| Rule prefs | `15190–15199` |
+| Rule prefs | `14000–16999` |
 | Config | `/etc/parsvpn/` (`profiles/`, `config.json`) |
 | Socket | `/var/run/parsvpn/daemon.sock` |
 | Lock | `/var/run/parsvpn/daemon.lock` |
@@ -101,7 +132,7 @@ Profiles live in `/etc/parsvpn/profiles/<name>.json` (`0600`). Importing a `.con
 ParsVPN checks GitHub releases (`serverpars/parsvpn`) for newer versions.
 
 - **Autopilot (default):** the daemon polls every 6 hours and installs updates automatically, then restarts itself. Active tunnels are restored after restart.
-- **Manual:** `parsvpn update --check` / `sudo parsvpn update`
+- **Manual:** `parsvpn update --check` / `sudo parsvpn update` (CLI/TUI re-exec into the new binary after install)
 - **Opt out:** `sudo parsvpn update --disable-auto` or set `"auto_update": false` in `/etc/parsvpn/config.json`
 
 ## Development

@@ -20,8 +20,8 @@ func TestIsolationDoesNotCollideWithWgQuick(t *testing.T) {
 	if constants.IfaceName == "wg0" || constants.IfaceName == "tun0" || constants.IfaceName == "tailscale0" {
 		t.Fatalf("IfaceName %q collides with common VPN ifaces", constants.IfaceName)
 	}
-	if constants.RulePrefMin < 15190 || constants.RulePrefMax > 15199 {
-		t.Fatalf("rule prefs out of reserved band: %d-%d", constants.RulePrefMin, constants.RulePrefMax)
+	if constants.RulePrefMin < 14000 || constants.RulePrefMax > 16998 || constants.RulePrefCatchAll != 16999 {
+		t.Fatalf("rule prefs out of reserved band: %d-%d catch=%d", constants.RulePrefMin, constants.RulePrefMax, constants.RulePrefCatchAll)
 	}
 	if constants.DNSListenAddr != "127.0.0.199:53" {
 		t.Fatalf("unexpected DNS listen addr %s", constants.DNSListenAddr)

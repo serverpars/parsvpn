@@ -18,6 +18,7 @@ func (e *Engine) CleanupOrphans() error                              { return ni
 func (e *Engine) EnsureKernelWireGuard() (bool, error)               { return false, errOS() }
 func (e *Engine) AssignAddress(string, int) error                    { return errOS() }
 func (e *Engine) ApplySplitRoutes([]string) error                    { return errOS() }
+func (e *Engine) ApplyExcludeRoutes([]string, string) error          { return errOS() }
 func (e *Engine) Teardown() error                                    { return nil }
 func (e *Engine) InterfaceIndex() (int, error)                       { return 0, errOS() }
 func (e *Engine) WatchLinkDeleted(<-chan struct{}, func()) error     { return errOS() }

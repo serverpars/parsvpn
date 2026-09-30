@@ -104,7 +104,7 @@ func (d *Daemon) Run() error {
 
 func (d *Daemon) handleConn(conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(180 * time.Second))
 	dec := json.NewDecoder(conn)
 	enc := json.NewEncoder(conn)
 	var req ipc.Request
@@ -133,6 +133,12 @@ func (d *Daemon) dispatch(req ipc.Request) ipc.Response {
 		st := d.Status()
 		return ipc.Response{OK: true, Status: &st}
 	case "status":
+		st := d.Status()
+		return ipc.Response{OK: true, Status: &st}
+	case "reload":
+		if err := d.Reload(); err != nil {
+			return ipc.Response{OK: false, Error: err.Error()}
+		}
 		st := d.Status()
 		return ipc.Response{OK: true, Status: &st}
 	case "ping":
@@ -179,10 +185,7 @@ func (d *Daemon) Up(name string) error {
 		_ = d.net.Teardown()
 		return err
 	}
-	cidrs := p.DestinationCIDRs()
-	if len(cidrs) == 0 {
-		log.Printf("warning: profile %q has no split CIDRs — tunnel up but no policy routes", p.Name)
-	} else if err := d.net.ApplySplitRoutes(cidrs); err != nil {
+	if err := d.applyRoutesLocked(p); err != nil {
 		_ = d.net.Teardown()
 		return err
 	}
@@ -208,7 +211,72 @@ func (d *Daemon) Up(name string) error {
 	}); err != nil {
 		log.Printf("link watch unavailable: %v", err)
 	}
-	log.Printf("up profile=%s iface=%s userspace=%v routes=%d", p.Name, constants.IfaceName, d.wg.Userspace(), len(cidrs))
+	routeN := len(p.DestinationCIDRs())
+	if p.EffectiveMode() == profile.SplitModeExclude {
+		if bypass, err := p.BypassCIDRs(); err == nil {
+			routeN = len(bypass)
+		}
+	}
+	log.Printf("up profile=%s mode=%s iface=%s userspace=%v routes=%d", p.Name, p.EffectiveMode(), constants.IfaceName, d.wg.Userspace(), routeN)
+	return nil
+}
+
+func (d *Daemon) applyRoutesLocked(p *profile.Profile) error {
+	switch p.EffectiveMode() {
+	case profile.SplitModeExclude:
+		bypass, err := p.BypassCIDRs()
+		if err != nil {
+			return err
+		}
+		return d.net.ApplyExcludeRoutes(bypass, p.PrimaryEndpointHost())
+	default:
+		cidrs := p.DestinationCIDRs()
+		if len(cidrs) == 0 {
+			log.Printf("warning: profile %q has no split CIDRs — tunnel up but no policy routes", p.Name)
+			return nil
+		}
+		return d.net.ApplySplitRoutes(cidrs)
+	}
+}
+
+// Reload re-reads the active profile from disk and re-applies routes + DNS
+// without tearing down the WireGuard interface.
+func (d *Daemon) Reload() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.active == nil {
+		return fmt.Errorf("no active profile")
+	}
+	name := d.active.Name
+	p, err := profile.Load(name)
+	if err != nil {
+		return err
+	}
+	if err := p.ValidateComplete(); err != nil {
+		return err
+	}
+	// Reconfigure WG (AllowedIPs may change with exclude mode).
+	if err := d.wg.Configure(p); err != nil {
+		return err
+	}
+	if err := d.applyRoutesLocked(p); err != nil {
+		return err
+	}
+	if d.dns != nil {
+		_ = d.dns.Stop()
+		d.dns = nil
+	}
+	if len(p.SplitTunnel.HostOverrides) > 0 {
+		adapter := dnseng.DetectAdapter()
+		proxy := dnseng.NewProxy(p.SplitTunnel.HostOverrides, firstDNS(p), adapter)
+		if err := proxy.Start(); err != nil {
+			return err
+		}
+		d.dns = proxy
+	}
+	d.active = p
+	_ = d.persistStateLocked()
+	log.Printf("reloaded profile=%s mode=%s", p.Name, p.EffectiveMode())
 	return nil
 }
 
@@ -268,7 +336,17 @@ func (d *Daemon) statusLocked() ipc.StatusPayload {
 	}
 	st.Profile = d.active.Name
 	st.Address = d.active.Address
-	st.SplitIPs = d.active.DestinationCIDRs()
+	if d.active.EffectiveMode() == profile.SplitModeExclude {
+		if bypass, err := d.active.BypassCIDRs(); err == nil {
+			st.SplitIPs = bypass
+			if len(st.SplitIPs) > 8 {
+				st.SplitIPs = append(st.SplitIPs[:8], fmt.Sprintf("... +%d more (exclude)", len(bypass)-8))
+			}
+		}
+		st.SplitIPs = append([]string{"mode=exclude"}, st.SplitIPs...)
+	} else {
+		st.SplitIPs = d.active.DestinationCIDRs()
+	}
 	st.Userspace = d.wg != nil && d.wg.Userspace()
 	if len(d.active.Peers) > 0 {
 		st.Endpoint = d.active.Peers[0].Endpoint

@@ -83,7 +83,7 @@ func (e *Engine) AssignAddress(addressCIDR string, mtu int) error {
 	return nil
 }
 
-// ApplySplitRoutes installs destination-based policy routing into table 51920.
+// ApplySplitRoutes installs destination-based policy routing into table 51920 (include mode).
 func (e *Engine) ApplySplitRoutes(cidrs []string) error {
 	if err := e.flushRules(); err != nil {
 		return err
@@ -126,6 +126,92 @@ func (e *Engine) ApplySplitRoutes(cidrs []string) error {
 	return nil
 }
 
+// ApplyExcludeRoutes tunnels everything via table 51920 except bypass CIDRs
+// (and the WireGuard endpoint), which stay on the main table.
+func (e *Engine) ApplyExcludeRoutes(bypass []string, endpointHost string) error {
+	if err := e.flushRules(); err != nil {
+		return err
+	}
+	if err := e.flushTable(); err != nil {
+		return err
+	}
+	link, err := netlink.LinkByName(e.Iface)
+	if err != nil {
+		return err
+	}
+
+	// Default route in the isolated table via the tunnel interface.
+	def4 := &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)}
+	if err := netlink.RouteReplace(&netlink.Route{
+		LinkIndex: link.Attrs().Index,
+		Dst:       def4,
+		Table:     e.Table,
+		Scope:     netlink.SCOPE_LINK,
+	}); err != nil {
+		return fmt.Errorf("default route table %d: %w", e.Table, err)
+	}
+
+	pref := constants.RulePrefMin
+	addBypass := func(cidr string) error {
+		_, dst, err := net.ParseCIDR(cidr)
+		if err != nil {
+			ip := net.ParseIP(cidr)
+			if ip == nil {
+				return fmt.Errorf("bad bypass cidr %s: %w", cidr, err)
+			}
+			if v4 := ip.To4(); v4 != nil {
+				dst = &net.IPNet{IP: v4, Mask: net.CIDRMask(32, 32)}
+			} else {
+				dst = &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}
+			}
+		}
+		rule := netlink.NewRule()
+		rule.Family = familyOf(dst)
+		rule.Table = unix.RT_TABLE_MAIN
+		rule.Priority = pref
+		rule.Dst = dst
+		if err := netlink.RuleAdd(rule); err != nil {
+			return fmt.Errorf("bypass rule %s: %w", cidr, err)
+		}
+		pref++
+		if pref > constants.RulePrefMax {
+			return fmt.Errorf("too many bypass CIDRs (max %d)", constants.RulePrefMax-constants.RulePrefMin+1)
+		}
+		return nil
+	}
+
+	// Always keep the WireGuard endpoint on the main table (avoid tunnel loops).
+	if endpointHost != "" {
+		if ip := net.ParseIP(endpointHost); ip != nil {
+			if v4 := ip.To4(); v4 != nil {
+				if err := addBypass(v4.String() + "/32"); err != nil {
+					return err
+				}
+			} else {
+				if err := addBypass(ip.String() + "/128"); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	for _, cidr := range bypass {
+		if err := addBypass(cidr); err != nil {
+			return err
+		}
+	}
+
+	// Catch-all: remaining traffic looks up the tunnel table.
+	catch := netlink.NewRule()
+	catch.Family = netlink.FAMILY_V4
+	catch.Table = e.Table
+	catch.Priority = constants.RulePrefCatchAll
+	if err := netlink.RuleAdd(catch); err != nil {
+		return fmt.Errorf("catch-all tunnel rule: %w", err)
+	}
+	return nil
+}
+
 // Teardown removes interface, rules, and table routes.
 func (e *Engine) Teardown() error {
 	_ = e.flushRules()
@@ -164,7 +250,7 @@ func (e *Engine) flushRules() error {
 			continue
 		}
 		for _, r := range rules {
-			if r.Priority >= constants.RulePrefMin && r.Priority <= constants.RulePrefMax {
+			if r.Priority >= constants.RulePrefMin && r.Priority <= constants.RulePrefCatchAll {
 				_ = netlink.RuleDel(&r)
 			}
 			if r.Table == e.Table {

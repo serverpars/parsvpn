@@ -41,6 +41,9 @@ func main() {
 		cmdDown(),
 		cmdStatus(),
 		cmdProfile(),
+		cmdRoute(),
+		cmdHost(),
+		cmdSplit(),
 		cmdUpdate(),
 	)
 
@@ -209,6 +212,211 @@ Examples:
 	return root
 }
 
+func saveProfileAndReload(p *profile.Profile) error {
+	if err := profile.Save(p); err != nil {
+		return err
+	}
+	resp, err := ipc.Call(ipc.Request{Cmd: "status"})
+	if err != nil || resp.Status == nil || !resp.Status.Active || resp.Status.Profile != p.Name {
+		return nil
+	}
+	reload, err := ipc.Call(ipc.Request{Cmd: "reload"})
+	if err != nil {
+		return fmt.Errorf("saved, but reload failed: %w", err)
+	}
+	if !reload.OK {
+		return fmt.Errorf("saved, but reload failed: %s", reload.Error)
+	}
+	fmt.Println("reloaded active tunnel")
+	return nil
+}
+
+func cmdRoute() *cobra.Command {
+	root := &cobra.Command{
+		Use:   "route",
+		Short: "Manage split-tunnel IP ranges on a profile",
+	}
+	listCmd := &cobra.Command{
+		Use:   "list <profile>",
+		Short: "List IP ranges (tunnel destinations or exclude bypasses)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := profile.Load(args[0])
+			if err != nil {
+				return err
+			}
+			fmt.Printf("mode=%s preset=%s\n", p.EffectiveMode(), orDash(p.SplitTunnel.BypassPreset))
+			for _, c := range p.SplitTunnel.IPRanges {
+				fmt.Println(c)
+			}
+			if p.EffectiveMode() == profile.SplitModeExclude && p.SplitTunnel.BypassPreset != "" {
+				bypass, err := p.BypassCIDRs()
+				if err != nil {
+					return err
+				}
+				fmt.Printf("# effective bypass count (preset+explicit): %d\n", len(bypass))
+			}
+			return nil
+		},
+	}
+	add := &cobra.Command{
+		Use:   "add <profile> <cidr> [cidr...]",
+		Short: "Add CIDR(s) to the profile route list",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := profile.Load(args[0])
+			if err != nil {
+				return err
+			}
+			if err := p.AddRoutes(args[1:]...); err != nil {
+				return err
+			}
+			if err := saveProfileAndReload(p); err != nil {
+				return err
+			}
+			fmt.Printf("updated routes on %s (%d entries)\n", p.Name, len(p.SplitTunnel.IPRanges))
+			return nil
+		},
+	}
+	rm := &cobra.Command{
+		Use:   "rm <profile> <cidr> [cidr...]",
+		Short: "Remove CIDR(s) from the profile route list",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := profile.Load(args[0])
+			if err != nil {
+				return err
+			}
+			if err := p.RemoveRoutes(args[1:]...); err != nil {
+				return err
+			}
+			if err := saveProfileAndReload(p); err != nil {
+				return err
+			}
+			fmt.Printf("updated routes on %s (%d entries)\n", p.Name, len(p.SplitTunnel.IPRanges))
+			return nil
+		},
+	}
+	root.AddCommand(listCmd, add, rm)
+	return root
+}
+
+func cmdHost() *cobra.Command {
+	root := &cobra.Command{
+		Use:   "host",
+		Short: "Manage DNS host overrides on a profile",
+	}
+	listCmd := &cobra.Command{
+		Use:   "list <profile>",
+		Short: "List host overrides",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := profile.Load(args[0])
+			if err != nil {
+				return err
+			}
+			for _, o := range p.SplitTunnel.HostOverrides {
+				fmt.Printf("%s %s\n", o.Domain, o.IP)
+			}
+			return nil
+		},
+	}
+	add := &cobra.Command{
+		Use:   "add <profile> <domain> <ip>",
+		Short: "Add or replace a host override",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := profile.Load(args[0])
+			if err != nil {
+				return err
+			}
+			if err := p.AddHostOverride(args[1], args[2]); err != nil {
+				return err
+			}
+			if err := saveProfileAndReload(p); err != nil {
+				return err
+			}
+			fmt.Printf("host override %s -> %s on %s\n", args[1], args[2], p.Name)
+			return nil
+		},
+	}
+	rm := &cobra.Command{
+		Use:   "rm <profile> <domain>",
+		Short: "Remove a host override",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := profile.Load(args[0])
+			if err != nil {
+				return err
+			}
+			if err := p.RemoveHostOverride(args[1]); err != nil {
+				return err
+			}
+			if err := saveProfileAndReload(p); err != nil {
+				return err
+			}
+			fmt.Printf("removed host override %s from %s\n", args[1], p.Name)
+			return nil
+		},
+	}
+	root.AddCommand(listCmd, add, rm)
+	return root
+}
+
+func cmdSplit() *cobra.Command {
+	root := &cobra.Command{
+		Use:   "split",
+		Short: "Configure split-tunnel mode and country bypass presets",
+	}
+	modeCmd := &cobra.Command{
+		Use:   "mode <profile> <include|exclude>",
+		Short: "Set split mode (include=listed CIDRs via tunnel; exclude=tunnel all except bypass)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := profile.Load(args[0])
+			if err != nil {
+				return err
+			}
+			if err := p.SetSplitMode(args[1]); err != nil {
+				return err
+			}
+			if err := saveProfileAndReload(p); err != nil {
+				return err
+			}
+			fmt.Printf("profile %s mode=%s\n", p.Name, p.EffectiveMode())
+			return nil
+		},
+	}
+	presetCmd := &cobra.Command{
+		Use:   "preset <profile> <ir|none>",
+		Short: "Set exclude-mode bypass preset (Iran CIDRs when ir)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := profile.Load(args[0])
+			if err != nil {
+				return err
+			}
+			if err := p.SetBypassPreset(args[1]); err != nil {
+				return err
+			}
+			if err := saveProfileAndReload(p); err != nil {
+				return err
+			}
+			fmt.Printf("profile %s bypass_preset=%s\n", p.Name, orDash(p.SplitTunnel.BypassPreset))
+			return nil
+		},
+	}
+	root.AddCommand(modeCmd, presetCmd)
+	return root
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
 func cmdUpdate() *cobra.Command {
 	var checkOnly bool
 	var force bool
@@ -275,7 +483,10 @@ updates automatically. Disable with --disable-auto or config auto_update=false.`
 			if err := update.Apply(ctx, rel); err != nil {
 				return err
 			}
-			fmt.Printf("updated to %s (service restarted)\n", update.FormatVersion(rel.Version))
+			fmt.Printf("updated to %s (service restarted) — relaunching\n", update.FormatVersion(rel.Version))
+			if err := update.ReexecSelf(); err != nil {
+				fmt.Printf("relaunch failed: %v (run parsvpn again)\n", err)
+			}
 			return nil
 		},
 	}

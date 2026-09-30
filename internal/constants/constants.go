@@ -4,14 +4,17 @@ import "time"
 
 const (
 	AppName    = "parsvpn"
-	Version    = "1.2.0"
+	Version    = "1.3.0"
 	IfaceName  = "pv-tun0"
 	RouteTable = 51920
 	// FwMark is reserved for a future full-tunnel path; v1 uses destination-based rules only.
 	FwMark = 0x5192
 
-	RulePrefMin = 15190
-	RulePrefMax = 15199
+	// RulePrefMin/Max bound destination policy rules (include destinations and
+	// exclude-mode bypass CIDRs). Catch-all exclude rule uses RulePrefCatchAll.
+	RulePrefMin      = 14000
+	RulePrefMax      = 16998
+	RulePrefCatchAll = 16999
 
 	ConfigDir   = "/etc/parsvpn"
 	ProfilesDir = "/etc/parsvpn/profiles"

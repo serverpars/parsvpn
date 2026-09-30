@@ -3,13 +3,21 @@ package profile
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/serverpars/parsvpn/internal/constants"
+	"github.com/serverpars/parsvpn/internal/geo"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+)
+
+// Split tunnel modes.
+const (
+	SplitModeInclude = "include" // destination CIDRs via tunnel (default)
+	SplitModeExclude = "exclude" // everything via tunnel except bypass CIDRs
 )
 
 // HostOverride maps a domain to a fixed IPv4/IPv6 address for the embedded DNS proxy.
@@ -18,8 +26,14 @@ type HostOverride struct {
 	IP     string `json:"ip"`
 }
 
-// SplitTunnel holds destination CIDRs and DNS host overrides. Full-tunnel is out of scope for v1.
+// SplitTunnel holds destination CIDRs and DNS host overrides.
 type SplitTunnel struct {
+	// Mode is "include" (default) or "exclude".
+	Mode string `json:"mode,omitempty"`
+	// BypassPreset expands named country lists into bypass CIDRs when mode=exclude.
+	// Supported: "ir", "" / "none".
+	BypassPreset string `json:"bypass_preset,omitempty"`
+	// IPRanges are tunnel destinations (include) or bypass destinations (exclude).
 	IPRanges      []string       `json:"ip_ranges"`
 	HostOverrides []HostOverride `json:"host_overrides"`
 }
@@ -178,7 +192,23 @@ func (p *Profile) Normalize() error {
 	if p.Peers == nil {
 		p.Peers = []Peer{}
 	}
-	if len(p.SplitTunnel.IPRanges) == 0 {
+	mode := p.EffectiveMode()
+	if mode != SplitModeInclude && mode != SplitModeExclude {
+		return fmt.Errorf("profile %q: invalid split_tunnel.mode %q (use include|exclude)", p.Name, p.SplitTunnel.Mode)
+	}
+	p.SplitTunnel.Mode = mode
+	preset := strings.ToLower(strings.TrimSpace(p.SplitTunnel.BypassPreset))
+	if preset == "none" {
+		preset = ""
+	}
+	p.SplitTunnel.BypassPreset = preset
+	if preset != "" {
+		if _, err := geo.PresetCIDRs(preset); err != nil {
+			return fmt.Errorf("profile %q: %w", p.Name, err)
+		}
+	}
+	// Only auto-fill include ranges from AllowedIPs; exclude mode keeps explicit bypass list.
+	if mode == SplitModeInclude && len(p.SplitTunnel.IPRanges) == 0 {
 		seen := map[string]struct{}{}
 		for _, peer := range p.Peers {
 			for _, cidr := range peer.AllowedIPs {
@@ -197,6 +227,15 @@ func (p *Profile) Normalize() error {
 	return nil
 }
 
+// EffectiveMode returns include|exclude (default include).
+func (p *Profile) EffectiveMode() string {
+	m := strings.ToLower(strings.TrimSpace(p.SplitTunnel.Mode))
+	if m == "" {
+		return SplitModeInclude
+	}
+	return m
+}
+
 // ValidateComplete ensures the profile can be brought up.
 func (p *Profile) ValidateComplete() error {
 	if p.PrivateKey == "" {
@@ -211,7 +250,205 @@ func (p *Profile) ValidateComplete() error {
 	return nil
 }
 
-// DestinationCIDRs returns the CIDRs that should be routed via the tunnel table.
+// DestinationCIDRs returns CIDRs routed via the tunnel table (include mode).
 func (p *Profile) DestinationCIDRs() []string {
+	if p.EffectiveMode() != SplitModeInclude {
+		return nil
+	}
 	return append([]string(nil), p.SplitTunnel.IPRanges...)
+}
+
+// BypassCIDRs returns destinations that should stay on the main table (exclude mode).
+// Merges bypass_preset with explicit ip_ranges.
+func (p *Profile) BypassCIDRs() ([]string, error) {
+	if p.EffectiveMode() != SplitModeExclude {
+		return nil, nil
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(cidrs []string) {
+		for _, c := range cidrs {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
+			}
+			if _, ok := seen[c]; ok {
+				continue
+			}
+			seen[c] = struct{}{}
+			out = append(out, c)
+		}
+	}
+	if p.SplitTunnel.BypassPreset != "" {
+		preset, err := geo.PresetCIDRs(p.SplitTunnel.BypassPreset)
+		if err != nil {
+			return nil, err
+		}
+		add(preset)
+	}
+	add(p.SplitTunnel.IPRanges)
+	return out, nil
+}
+
+// PeerAllowedIPsForConfigure returns AllowedIPs to push to WireGuard.
+// Exclude mode forces 0.0.0.0/0 so foreign traffic can enter the tunnel.
+func (p *Profile) PeerAllowedIPsForConfigure(peer Peer) []string {
+	if p.EffectiveMode() == SplitModeExclude {
+		hasV4Default := false
+		out := make([]string, 0, len(peer.AllowedIPs)+1)
+		for _, c := range peer.AllowedIPs {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
+			}
+			if c == "0.0.0.0/0" {
+				hasV4Default = true
+			}
+			out = append(out, c)
+		}
+		if !hasV4Default {
+			out = append(out, "0.0.0.0/0")
+		}
+		return out
+	}
+	return append([]string(nil), peer.AllowedIPs...)
+}
+
+// PrimaryEndpointHost returns the first peer endpoint host (IP or hostname).
+func (p *Profile) PrimaryEndpointHost() string {
+	for _, peer := range p.Peers {
+		if peer.Endpoint == "" {
+			continue
+		}
+		host, _, err := net.SplitHostPort(peer.Endpoint)
+		if err != nil {
+			return peer.Endpoint
+		}
+		return host
+	}
+	return ""
+}
+
+// AddRoutes appends unique CIDRs to split_tunnel.ip_ranges.
+func (p *Profile) AddRoutes(cidrs ...string) error {
+	seen := map[string]struct{}{}
+	for _, c := range p.SplitTunnel.IPRanges {
+		seen[c] = struct{}{}
+	}
+	for _, c := range cidrs {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(c); err != nil {
+			// Allow bare IP → /32 or /128
+			ip := net.ParseIP(c)
+			if ip == nil {
+				return fmt.Errorf("invalid CIDR %q", c)
+			}
+			if ip.To4() != nil {
+				c = ip.String() + "/32"
+			} else {
+				c = ip.String() + "/128"
+			}
+		}
+		if _, ok := seen[c]; ok {
+			continue
+		}
+		seen[c] = struct{}{}
+		p.SplitTunnel.IPRanges = append(p.SplitTunnel.IPRanges, c)
+	}
+	return nil
+}
+
+// RemoveRoutes deletes matching CIDRs from split_tunnel.ip_ranges.
+func (p *Profile) RemoveRoutes(cidrs ...string) error {
+	want := map[string]struct{}{}
+	for _, c := range cidrs {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		want[c] = struct{}{}
+		if ip := net.ParseIP(c); ip != nil {
+			if ip.To4() != nil {
+				want[ip.String()+"/32"] = struct{}{}
+			} else {
+				want[ip.String()+"/128"] = struct{}{}
+			}
+		}
+	}
+	out := p.SplitTunnel.IPRanges[:0]
+	for _, c := range p.SplitTunnel.IPRanges {
+		if _, ok := want[c]; ok {
+			continue
+		}
+		out = append(out, c)
+	}
+	p.SplitTunnel.IPRanges = out
+	return nil
+}
+
+// AddHostOverride adds or replaces a domain→IP override.
+func (p *Profile) AddHostOverride(domain, ip string) error {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	ip = strings.TrimSpace(ip)
+	if domain == "" {
+		return fmt.Errorf("domain required")
+	}
+	if net.ParseIP(ip) == nil {
+		return fmt.Errorf("invalid IP %q", ip)
+	}
+	for i := range p.SplitTunnel.HostOverrides {
+		if strings.EqualFold(p.SplitTunnel.HostOverrides[i].Domain, domain) {
+			p.SplitTunnel.HostOverrides[i].IP = ip
+			return nil
+		}
+	}
+	p.SplitTunnel.HostOverrides = append(p.SplitTunnel.HostOverrides, HostOverride{Domain: domain, IP: ip})
+	return nil
+}
+
+// RemoveHostOverride removes a domain override.
+func (p *Profile) RemoveHostOverride(domain string) error {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	out := p.SplitTunnel.HostOverrides[:0]
+	found := false
+	for _, o := range p.SplitTunnel.HostOverrides {
+		if strings.EqualFold(o.Domain, domain) {
+			found = true
+			continue
+		}
+		out = append(out, o)
+	}
+	if !found {
+		return fmt.Errorf("host override %q not found", domain)
+	}
+	p.SplitTunnel.HostOverrides = out
+	return nil
+}
+
+// SetSplitMode sets include|exclude.
+func (p *Profile) SetSplitMode(mode string) error {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode != SplitModeInclude && mode != SplitModeExclude {
+		return fmt.Errorf("invalid mode %q (use include|exclude)", mode)
+	}
+	p.SplitTunnel.Mode = mode
+	return nil
+}
+
+// SetBypassPreset sets ir|none|"".
+func (p *Profile) SetBypassPreset(name string) error {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "none" {
+		name = ""
+	}
+	if name != "" {
+		if _, err := geo.PresetCIDRs(name); err != nil {
+			return err
+		}
+	}
+	p.SplitTunnel.BypassPreset = name
+	return nil
 }

@@ -52,7 +52,7 @@ func Call(req Request) (*Response, error) {
 		return nil, fmt.Errorf("daemon not running (socket %s): %w", constants.SocketPath, err)
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(120 * time.Second))
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(conn)
 	if err := enc.Encode(req); err != nil {

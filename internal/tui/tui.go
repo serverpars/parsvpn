@@ -80,6 +80,7 @@ type model struct {
 	deleteName    string
 	updateVersion string
 	updating      bool
+	needsReexec   bool
 }
 
 type tickMsg struct{}
@@ -115,8 +116,14 @@ func Run() error {
 	}
 	st, _ := fetchStatus()
 	m := newModel(names, st)
-	_, err = tea.NewProgram(m, tea.WithAltScreen()).Run()
-	return err
+	final, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	if err != nil {
+		return err
+	}
+	if fm, ok := final.(model); ok && fm.needsReexec {
+		return update.ReexecSelf()
+	}
+	return nil
 }
 
 func newModel(names []string, st ipc.StatusPayload) model {
@@ -277,6 +284,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = ""
 			m.notice = fmt.Sprintf("updated to %s — restarting", update.FormatVersion(msg.version))
 			m.updateVersion = ""
+			m.needsReexec = true
+			return m, tea.Quit
 		}
 	case tea.KeyMsg:
 		switch m.mode {

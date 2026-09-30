@@ -218,7 +218,7 @@ func buildConfig(p *profile.Profile) (wgtypes.Config, error) {
 			ka := time.Duration(peer.PersistentKeepalive) * time.Second
 			pc.PersistentKeepaliveInterval = &ka
 		}
-		for _, cidr := range peer.AllowedIPs {
+		for _, cidr := range p.PeerAllowedIPsForConfigure(peer) {
 			_, ipnet, err := net.ParseCIDR(cidr)
 			if err != nil {
 				return wgtypes.Config{}, fmt.Errorf("allowed ip %s: %w", cidr, err)
@@ -264,7 +264,7 @@ func cfgToUAPI(p *profile.Profile) (string, error) {
 		if peer.PersistentKeepalive > 0 {
 			out += fmt.Sprintf("persistent_keepalive_interval=%d\n", peer.PersistentKeepalive)
 		}
-		for _, cidr := range peer.AllowedIPs {
+		for _, cidr := range p.PeerAllowedIPsForConfigure(peer) {
 			out += fmt.Sprintf("allowed_ip=%s\n", cidr)
 		}
 	}

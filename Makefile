@@ -1,6 +1,6 @@
 .PHONY: build test coexist tidy
 
-VERSION ?= 1.2.0
+VERSION ?= 1.3.0
 
 build:
 	bash scripts/build.sh
