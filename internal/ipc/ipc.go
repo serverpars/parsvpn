@@ -18,19 +18,21 @@ type Request struct {
 
 // StatusPayload is returned by status / after up.
 type StatusPayload struct {
-	Active    bool      `json:"active"`
-	Profile   string    `json:"profile,omitempty"`
-	Interface string    `json:"interface,omitempty"`
-	Endpoint  string    `json:"endpoint,omitempty"`
-	Address   string    `json:"address,omitempty"`
-	Handshake string    `json:"handshake,omitempty"`
-	RxBytes   int64     `json:"rx_bytes"`
-	TxBytes   int64     `json:"tx_bytes"`
-	SplitIPs  []string  `json:"split_ips,omitempty"`
-	Overrides []string  `json:"overrides,omitempty"`
-	Userspace bool      `json:"userspace,omitempty"`
-	Error     string    `json:"error,omitempty"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	Active      bool      `json:"active"`
+	Profile     string    `json:"profile,omitempty"`
+	Interface   string    `json:"interface,omitempty"`
+	Endpoint    string    `json:"endpoint,omitempty"`
+	Address     string    `json:"address,omitempty"`
+	Handshake   string    `json:"handshake,omitempty"`
+	RxBytes     int64     `json:"rx_bytes"`
+	TxBytes     int64     `json:"tx_bytes"`
+	SplitIPs    []string  `json:"split_ips,omitempty"`
+	Overrides   []string  `json:"overrides,omitempty"`
+	DNSOverride bool      `json:"dns_override,omitempty"`
+	DNSServers  []string  `json:"dns_servers,omitempty"`
+	Userspace   bool      `json:"userspace,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
 }
 
 // Response wraps command results.

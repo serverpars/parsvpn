@@ -75,6 +75,10 @@ func ImportWireGuardConfReader(r io.Reader, name string) (*Profile, error) {
 				p.ListenPort = n
 			case "dns":
 				p.DNS = splitCSV(val)
+				// Match wg-quick: a DNS= line means push resolvers while the tunnel is up.
+				if len(p.DNS) > 0 {
+					p.OverrideSystemDNS = true
+				}
 			case "mtu":
 				n, err := strconv.Atoi(val)
 				if err != nil {

@@ -45,6 +45,7 @@ const (
 	modeEditHosts
 	modeEditHostAdd
 	modeEditSplit
+	modeEditDNS
 )
 
 type addSource int
@@ -304,6 +305,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = next.(model)
 		case "split":
 			m.mode = modeEditSplit
+		case "dns":
+			m.mode = modeEditDNS
 		default:
 			m.mode = modeEditMenu
 		}
@@ -345,6 +348,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateEditHostAdd(msg)
 		case modeEditSplit:
 			return m.updateEditSplit(msg)
+		case modeEditDNS:
+			return m.updateEditDNS(msg)
 		default:
 			return m.updateBrowse(msg)
 		}
@@ -366,6 +371,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.nameInput, cmd = m.nameInput.Update(msg)
 		return m, cmd
+	case modeEditDNS:
+		if m.nameInput.Focused() {
+			var cmd tea.Cmd
+			m.nameInput, cmd = m.nameInput.Update(msg)
+			return m, cmd
+		}
+		return m, nil
 	case modeEditRoutes, modeEditHosts:
 		var cmd tea.Cmd
 		m.editList, cmd = m.editList.Update(msg)
@@ -673,6 +685,8 @@ func (m model) View() string {
 		return m.viewEditHostAdd()
 	case modeEditSplit:
 		return m.viewEditSplit()
+	case modeEditDNS:
+		return m.viewEditDNS()
 	default:
 		return m.viewBrowse()
 	}
@@ -698,6 +712,15 @@ func (m model) viewBrowse() string {
 				detail.WriteString("  " + strings.Join(m.status.SplitIPs[1:], "\n  ") + "\n")
 			}
 		}
+		dnsState := "off"
+		if m.status.DNSOverride {
+			dnsState = "on"
+		}
+		servers := "-"
+		if len(m.status.DNSServers) > 0 {
+			servers = strings.Join(m.status.DNSServers, ",")
+		}
+		detail.WriteString(fmt.Sprintf("DNS: override=%s servers=%s\n", dnsState, servers))
 		if len(m.status.Overrides) > 0 {
 			detail.WriteString("Host Overrides:\n")
 			for _, o := range m.status.Overrides {

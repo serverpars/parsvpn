@@ -8,12 +8,13 @@ import (
 	"github.com/serverpars/parsvpn/internal/constants"
 )
 
-// ResolvConfAdapter prepends nameserver 127.0.0.199 for Alma/CentOS-style hosts.
+// ResolvConfAdapter rewrites /etc/resolv.conf for Alma/CentOS-style hosts
+// (and as a fallback when resolvectl is unavailable).
 type ResolvConfAdapter struct {
 	backedUp bool
 }
 
-func (a *ResolvConfAdapter) Apply(domains []string) error {
+func (a *ResolvConfAdapter) Apply(opts ApplyOpts) error {
 	const resolv = "/etc/resolv.conf"
 	orig, err := os.ReadFile(resolv)
 	if err != nil && !os.IsNotExist(err) {
@@ -27,6 +28,12 @@ func (a *ResolvConfAdapter) Apply(domains []string) error {
 	var b strings.Builder
 	b.WriteString("# Managed by parsvpn — do not edit while tunnel is up\n")
 	b.WriteString("nameserver 127.0.0.199\n")
+
+	if opts.CatchAll {
+		// Replace system resolvers entirely so ISP DNS cannot answer first.
+		return os.WriteFile(resolv, []byte(b.String()), 0o644)
+	}
+
 	for _, line := range strings.Split(string(orig), "\n") {
 		trim := strings.TrimSpace(line)
 		if trim == "" || strings.HasPrefix(trim, "#") {
@@ -38,9 +45,9 @@ func (a *ResolvConfAdapter) Apply(domains []string) error {
 		b.WriteString(line)
 		b.WriteByte('\n')
 	}
-	if len(domains) > 0 {
+	if len(opts.Domains) > 0 {
 		b.WriteString("search ")
-		b.WriteString(strings.Join(domains, " "))
+		b.WriteString(strings.Join(opts.Domains, " "))
 		b.WriteByte('\n')
 	}
 	return os.WriteFile(resolv, []byte(b.String()), 0o644)

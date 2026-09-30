@@ -8,7 +8,8 @@ Standalone, Linux-only WireGuard VPN client for ServerPars. Single static binary
 - Isolated interface `pv-tun0`, routing table `51920`, rule priorities `14000–16999`
 - Split-tunnel by destination CIDR (never steals the default route by default)
 - Optional exclude mode: tunnel all traffic except bypass CIDRs (e.g. Iran)
-- Optional host overrides via embedded DNS on `127.0.0.199:53`
+- Optional system DNS override via embedded resolver on `127.0.0.199:53`
+- Optional host overrides via the same embedded DNS
 - Static ELF (`CGO_ENABLED=0`) for CentOS 7 / AlmaLinux 8–9 / Ubuntu 20.04+
 
 ## Install
@@ -45,7 +46,7 @@ sudo parsvpn up office
 parsvpn status --json
 sudo parsvpn down
 
-# Interactive dashboard (press [a] to add; [e] to edit routes/hosts/split)
+# Interactive dashboard (press [a] to add; [e] to edit routes/hosts/DNS/split)
 sudo parsvpn
 
 # Check / install updates (daemon also auto-updates by default)
@@ -54,7 +55,7 @@ sudo parsvpn update
 sudo parsvpn update --disable-auto   # opt out of autopilot
 ```
 
-### Routes, hosts, and split mode
+### Routes, hosts, DNS, and split mode
 
 ```bash
 # List / add / remove split IP ranges (include: via tunnel; exclude: bypass)
@@ -62,11 +63,17 @@ parsvpn route list office
 sudo parsvpn route add office 10.10.0.0/16 203.0.113.0/24
 sudo parsvpn route rm office 203.0.113.0/24
 
-# DNS host overrides (embedded resolver)
+# DNS host overrides (embedded resolver pins)
 parsvpn host list office
 sudo parsvpn host add office example.com          # resolve via tunnel DNS, pin + route
 sudo parsvpn host add office db.internal 10.10.0.50  # optional explicit IP
 sudo parsvpn host rm office example.com
+
+# Override system DNS while connected (bypasses ISP filtering e.g. youtube → 10.10.34.35)
+parsvpn dns show office
+sudo parsvpn dns override office on          # forward all DNS via tunnel (1.1.1.1 by default)
+sudo parsvpn dns set office 1.1.1.1 8.8.8.8  # set upstream + enable override
+sudo parsvpn dns override office off
 
 # Tunnel everything except Iran (preset enables exclude mode)
 sudo parsvpn split preset office ir
@@ -77,7 +84,7 @@ sudo parsvpn split mode office include
 sudo parsvpn split preset office none
 ```
 
-If the profile is active, route/host/split changes are saved and the daemon reloads automatically.
+If the profile is active, route/host/dns/split changes are saved and the daemon reloads automatically.
 
 Daemon (started by systemd):
 
@@ -94,6 +101,8 @@ Profiles live in `/etc/parsvpn/profiles/<name>.json` (`0600`). Importing a `.con
   "name": "office",
   "private_key": "...",
   "address": "10.200.0.2/32",
+  "dns": ["1.1.1.1"],
+  "override_system_dns": true,
   "peers": [
     {
       "public_key": "...",
@@ -115,6 +124,7 @@ Profiles live in `/etc/parsvpn/profiles/<name>.json` (`0600`). Importing a `.con
 
 - `mode: "include"` (default): `ip_ranges` go through the tunnel.
 - `mode: "exclude"`: everything goes through the tunnel except `ip_ranges` plus `bypass_preset` (e.g. `"ir"` for Iran IPv4). WireGuard AllowedIPs are forced to include `0.0.0.0/0`; the peer endpoint is always bypassed.
+- `override_system_dns: true`: while connected, all system DNS is routed through the embedded proxy to `dns` (or `1.1.1.1`). Importing a WireGuard conf with `DNS=` enables this automatically.
 
 ## Isolation map
 

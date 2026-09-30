@@ -190,14 +190,9 @@ func (d *Daemon) Up(name string) error {
 		return err
 	}
 
-	if len(p.SplitTunnel.HostOverrides) > 0 {
-		adapter := dnseng.DetectAdapter()
-		proxy := dnseng.NewProxy(p.SplitTunnel.HostOverrides, firstDNS(p), adapter)
-		if err := proxy.Start(); err != nil {
-			_ = d.net.Teardown()
-			return err
-		}
-		d.dns = proxy
+	if err := d.startDNSLocked(p); err != nil {
+		_ = d.net.Teardown()
+		return err
 	}
 
 	d.active = p
@@ -217,7 +212,8 @@ func (d *Daemon) Up(name string) error {
 			routeN = len(bypass)
 		}
 	}
-	log.Printf("up profile=%s mode=%s iface=%s userspace=%v routes=%d", p.Name, p.EffectiveMode(), constants.IfaceName, d.wg.Userspace(), routeN)
+	log.Printf("up profile=%s mode=%s iface=%s userspace=%v routes=%d dns_override=%v",
+		p.Name, p.EffectiveMode(), constants.IfaceName, d.wg.Userspace(), routeN, p.OverrideSystemDNS)
 	return nil
 }
 
@@ -231,12 +227,46 @@ func (d *Daemon) applyRoutesLocked(p *profile.Profile) error {
 		return d.net.ApplyExcludeRoutes(bypass, p.PrimaryEndpointHost())
 	default:
 		cidrs := p.DestinationCIDRs()
+		if p.OverrideSystemDNS {
+			cidrs = appendDNSRoute(cidrs, p.UpstreamDNSHost())
+		}
 		if len(cidrs) == 0 {
 			log.Printf("warning: profile %q has no split CIDRs — tunnel up but no policy routes", p.Name)
 			return nil
 		}
 		return d.net.ApplySplitRoutes(cidrs)
 	}
+}
+
+func appendDNSRoute(cidrs []string, dnsHost string) []string {
+	ip := net.ParseIP(dnsHost)
+	if ip == nil || ip.To4() == nil {
+		return cidrs
+	}
+	want := ip.String() + "/32"
+	for _, c := range cidrs {
+		if c == want || c == ip.String() {
+			return cidrs
+		}
+	}
+	return append(cidrs, want)
+}
+
+func (d *Daemon) startDNSLocked(p *profile.Profile) error {
+	if d.dns != nil {
+		_ = d.dns.Stop()
+		d.dns = nil
+	}
+	if !p.NeedsDNSProxy() {
+		return nil
+	}
+	adapter := dnseng.DetectAdapter()
+	proxy := dnseng.NewProxy(p.SplitTunnel.HostOverrides, firstDNS(p), adapter, p.OverrideSystemDNS)
+	if err := proxy.Start(); err != nil {
+		return err
+	}
+	d.dns = proxy
+	return nil
 }
 
 // Reload re-reads the active profile from disk and re-applies routes + DNS
@@ -262,21 +292,12 @@ func (d *Daemon) Reload() error {
 	if err := d.applyRoutesLocked(p); err != nil {
 		return err
 	}
-	if d.dns != nil {
-		_ = d.dns.Stop()
-		d.dns = nil
-	}
-	if len(p.SplitTunnel.HostOverrides) > 0 {
-		adapter := dnseng.DetectAdapter()
-		proxy := dnseng.NewProxy(p.SplitTunnel.HostOverrides, firstDNS(p), adapter)
-		if err := proxy.Start(); err != nil {
-			return err
-		}
-		d.dns = proxy
+	if err := d.startDNSLocked(p); err != nil {
+		return err
 	}
 	d.active = p
 	_ = d.persistStateLocked()
-	log.Printf("reloaded profile=%s mode=%s", p.Name, p.EffectiveMode())
+	log.Printf("reloaded profile=%s mode=%s dns_override=%v", p.Name, p.EffectiveMode(), p.OverrideSystemDNS)
 	return nil
 }
 
@@ -365,6 +386,12 @@ func (d *Daemon) statusLocked() ipc.StatusPayload {
 	}
 	for _, o := range d.active.SplitTunnel.HostOverrides {
 		st.Overrides = append(st.Overrides, o.Domain+" -> "+o.IP)
+	}
+	st.DNSOverride = d.active.OverrideSystemDNS
+	if len(d.active.DNS) > 0 {
+		st.DNSServers = append([]string(nil), d.active.DNS...)
+	} else if d.active.OverrideSystemDNS {
+		st.DNSServers = []string{d.active.UpstreamDNSHost()}
 	}
 	if d.wg != nil {
 		rx, tx, hs, err := d.wg.Stats()

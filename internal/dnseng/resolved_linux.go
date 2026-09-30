@@ -18,7 +18,7 @@ type ResolvedAdapter struct {
 	applied bool
 }
 
-func (a *ResolvedAdapter) Apply(domains []string) error {
+func (a *ResolvedAdapter) Apply(opts ApplyOpts) error {
 	link, err := netlink.LinkByName(constants.IfaceName)
 	if err != nil {
 		return fmt.Errorf("resolved adapter needs %s: %w", constants.IfaceName, err)
@@ -28,21 +28,34 @@ func (a *ResolvedAdapter) Apply(domains []string) error {
 	if _, err := exec.LookPath("resolvectl"); err != nil {
 		// Fall back to resolv.conf if resolvectl missing.
 		fb := &ResolvConfAdapter{}
-		return fb.Apply(domains)
+		return fb.Apply(opts)
 	}
 
 	cmd := exec.Command("resolvectl", "dns", ifIndex, "127.0.0.199")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("resolvectl dns: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
-	if len(domains) > 0 {
-		args := append([]string{"domain", ifIndex}, domains...)
+
+	switch {
+	case opts.CatchAll:
+		// ~. = route all DNS lookups to this link's resolvers (bypass ISP filtering).
+		cmd = exec.Command("resolvectl", "domain", ifIndex, "~.")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("resolvectl domain ~.: %w (%s)", err, strings.TrimSpace(string(out)))
+		}
+		_ = exec.Command("resolvectl", "default-route", ifIndex, "true").Run()
+	case len(opts.Domains) > 0:
+		args := append([]string{"domain", ifIndex}, opts.Domains...)
 		cmd = exec.Command("resolvectl", args...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("resolvectl domain: %w (%s)", err, strings.TrimSpace(string(out)))
 		}
+		_ = exec.Command("resolvectl", "default-route", ifIndex, "false").Run()
+	default:
+		_ = exec.Command("resolvectl", "default-route", ifIndex, "false").Run()
 	}
-	_ = exec.Command("resolvectl", "default-route", ifIndex, "false").Run()
+
+	_ = exec.Command("resolvectl", "flush-caches").Run()
 	a.applied = true
 	return nil
 }

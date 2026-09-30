@@ -12,22 +12,33 @@ import (
 	"github.com/serverpars/parsvpn/internal/profile"
 )
 
-// Proxy is an embedded DNS resolver for host overrides on 127.0.0.199:53.
+// ApplyOpts configures how the host resolver is pointed at the embedded proxy.
+type ApplyOpts struct {
+	// Domains are routing-only domains registered on the tunnel link (host overrides).
+	Domains []string
+	// CatchAll makes the proxy the system default resolver (all queries).
+	CatchAll bool
+}
+
+// Proxy is an embedded DNS resolver on 127.0.0.199:53.
+// It answers host overrides locally and forwards everything else upstream
+// (profile DNS or 1.1.1.1), which should be reached via the tunnel.
 type Proxy struct {
 	mu        sync.RWMutex
 	overrides map[string]net.IP
 	upstream  string
+	catchAll  bool
 	server    *dns.Server
 	adapter   ResolverAdapter
 }
 
 // ResolverAdapter integrates with the host resolver (resolved / resolv.conf).
 type ResolverAdapter interface {
-	Apply(domains []string) error
+	Apply(opts ApplyOpts) error
 	Restore() error
 }
 
-func NewProxy(overrides []profile.HostOverride, upstream string, adapter ResolverAdapter) *Proxy {
+func NewProxy(overrides []profile.HostOverride, upstream string, adapter ResolverAdapter, catchAll bool) *Proxy {
 	if upstream == "" {
 		upstream = "1.1.1.1:53"
 	}
@@ -39,7 +50,7 @@ func NewProxy(overrides []profile.HostOverride, upstream string, adapter Resolve
 		}
 		m[strings.ToLower(strings.TrimSuffix(o.Domain, "."))] = ip
 	}
-	return &Proxy{overrides: m, upstream: upstream, adapter: adapter}
+	return &Proxy{overrides: m, upstream: upstream, adapter: adapter, catchAll: catchAll}
 }
 
 // Start binds DNSListenAddr. Fails clearly if the address is taken.
@@ -67,8 +78,8 @@ func (p *Proxy) Start() error {
 		domains = append(domains, d)
 	}
 	p.mu.RUnlock()
-	if p.adapter != nil && len(domains) > 0 {
-		if err := p.adapter.Apply(domains); err != nil {
+	if p.adapter != nil && (p.catchAll || len(domains) > 0) {
+		if err := p.adapter.Apply(ApplyOpts{Domains: domains, CatchAll: p.catchAll}); err != nil {
 			_ = p.Stop()
 			return err
 		}
@@ -118,7 +129,7 @@ func (p *Proxy) handle(w dns.ResponseWriter, r *dns.Msg) {
 		}
 	}
 
-	// Forward everything else upstream.
+	// Forward everything else upstream (via tunnel when override/routes are set).
 	c := new(dns.Client)
 	in, _, err := c.Exchange(r, p.upstream)
 	if err != nil || in == nil {
@@ -129,7 +140,7 @@ func (p *Proxy) handle(w dns.ResponseWriter, r *dns.Msg) {
 	_ = w.WriteMsg(in)
 }
 
-// DetectAdapter picks systemd-resolved D-Bus when available, else resolv.conf.
+// DetectAdapter picks systemd-resolved when available, else resolv.conf.
 func DetectAdapter() ResolverAdapter {
 	if _, err := os.Stat("/run/systemd/resolve/stub-resolv.conf"); err == nil {
 		return &ResolvedAdapter{}

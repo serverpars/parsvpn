@@ -49,6 +49,13 @@ func (m model) updateEditMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeEditSplit
 		m.err = ""
 		return m, nil
+	case "d":
+		m.mode = modeEditDNS
+		m.nameInput.Blur()
+		m.nameInput.SetValue("")
+		m.err = ""
+		m.notice = ""
+		return m, nil
 	}
 	return m, nil
 }
@@ -217,6 +224,55 @@ func (m model) updateEditSplit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) updateEditDNS(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.nameInput.Focused() {
+		switch msg.String() {
+		case "esc":
+			m.nameInput.Blur()
+			m.nameInput.SetValue("")
+			m.err = ""
+			return m, nil
+		case "ctrl+c":
+			return m, tea.Quit
+		case "enter":
+			raw := strings.TrimSpace(m.nameInput.Value())
+			m.nameInput.Blur()
+			m.nameInput.SetValue("")
+			if raw == "" {
+				m.err = "enter one or more DNS IPs"
+				return m, nil
+			}
+			parts := strings.FieldsFunc(raw, func(r rune) bool {
+				return r == ',' || r == ' ' || r == '\t'
+			})
+			return m, editSetDNSServers(m.editProfile, parts...)
+		}
+		return m, nil
+	}
+	switch msg.String() {
+	case "esc":
+		m.mode = modeEditMenu
+		m.err = ""
+		m.notice = ""
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "o":
+		return m, editSetDNSOverride(m.editProfile, true)
+	case "f":
+		return m, editSetDNSOverride(m.editProfile, false)
+	case "s":
+		m.nameInput.SetValue("")
+		m.nameInput.Placeholder = "1.1.1.1 8.8.8.8"
+		cmd := m.nameInput.Focus()
+		m.err = ""
+		return m, cmd
+	case "c":
+		return m, editClearDNSServers(m.editProfile)
+	}
+	return m, nil
+}
+
 func saveAndReload(p *profile.Profile) error {
 	if err := profile.Save(p); err != nil {
 		return fmt.Errorf("save: %w (try running as root)", err)
@@ -331,6 +387,63 @@ func editSetPreset(profileName, preset string) tea.Cmd {
 	}
 }
 
+func editSetDNSOverride(profileName string, on bool) tea.Cmd {
+	return func() tea.Msg {
+		p, err := profile.Load(profileName)
+		if err != nil {
+			return editDoneMsg{err: err, reopen: "dns"}
+		}
+		p.SetOverrideSystemDNS(on)
+		if err := saveAndReload(p); err != nil {
+			return editDoneMsg{err: err, reopen: "dns"}
+		}
+		state := "off"
+		if on {
+			state = "on"
+		}
+		return editDoneMsg{message: "dns override=" + state, reopen: "dns"}
+	}
+}
+
+func editSetDNSServers(profileName string, servers ...string) tea.Cmd {
+	return func() tea.Msg {
+		p, err := profile.Load(profileName)
+		if err != nil {
+			return editDoneMsg{err: err, reopen: "dns"}
+		}
+		if err := p.SetDNSServers(servers...); err != nil {
+			return editDoneMsg{err: err, reopen: "dns"}
+		}
+		p.SetOverrideSystemDNS(true)
+		if err := saveAndReload(p); err != nil {
+			return editDoneMsg{err: err, reopen: "dns"}
+		}
+		return editDoneMsg{
+			message: fmt.Sprintf("dns override=on servers=%s", strings.Join(p.DNS, ",")),
+			reopen:  "dns",
+		}
+	}
+}
+
+func editClearDNSServers(profileName string) tea.Cmd {
+	return func() tea.Msg {
+		p, err := profile.Load(profileName)
+		if err != nil {
+			return editDoneMsg{err: err, reopen: "dns"}
+		}
+		if err := p.SetDNSServers(); err != nil {
+			return editDoneMsg{err: err, reopen: "dns"}
+		}
+		if err := saveAndReload(p); err != nil {
+			return editDoneMsg{err: err, reopen: "dns"}
+		}
+		return editDoneMsg{
+			message: fmt.Sprintf("dns servers cleared (default %s)", p.UpstreamDNSHost()),
+			reopen:  "dns",
+		}
+	}
+}
+
 func newEditList() list.Model {
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = false
@@ -346,7 +459,8 @@ func (m model) viewEditMenu() string {
 	body := `What do you want to manage?
 
   [r]  Routes (split IP ranges / bypass CIDRs)
-  [h]  Host overrides (DNS)
+  [h]  Host overrides (DNS pins)
+  [d]  System DNS override
   [s]  Split mode & country preset
 `
 	var errLine string
@@ -428,6 +542,50 @@ func (m model) viewEditSplit() string {
 
 Note: preset only works in exclude mode (choosing [p] enables exclude).
 `, mode, preset)
+	var errLine string
+	if m.err != "" {
+		errLine = "\nError: " + m.err + "\n"
+	}
+	if m.notice != "" {
+		errLine += "\n" + m.notice + "\n"
+	}
+	help := helpStyle.Render("[esc] Back")
+	return header + "\n\n" + body + errLine + "\n" + help
+}
+
+func (m model) viewEditDNS() string {
+	header := titleStyle.Render(fmt.Sprintf("System DNS — %s", m.editProfile))
+	override, servers := "off", "1.1.1.1 (default)"
+	if p, err := profile.Load(m.editProfile); err == nil {
+		if p.OverrideSystemDNS {
+			override = "on"
+		}
+		if len(p.DNS) > 0 {
+			servers = strings.Join(p.DNS, ", ")
+		} else {
+			servers = p.UpstreamDNSHost() + " (default)"
+		}
+	}
+	body := fmt.Sprintf(`Current: override=%s  upstream=%s
+
+When override is on, all system DNS goes through the tunnel (fixes ISP
+filtering like youtube.com → 10.10.34.35).
+
+`, override, servers)
+	if m.nameInput.Focused() {
+		body += promptStyle.Render("DNS servers:") + "\n" + m.nameInput.View() + "\n"
+		help := helpStyle.Render("[enter] Save & enable override  [esc] Cancel")
+		var errLine string
+		if m.err != "" {
+			errLine = "\nError: " + m.err + "\n"
+		}
+		return header + "\n\n" + body + errLine + "\n" + help
+	}
+	body += `  [o]  Override on
+  [f]  Override off
+  [s]  Set upstream DNS servers (also enables override)
+  [c]  Clear servers (fallback 1.1.1.1)
+`
 	var errLine string
 	if m.err != "" {
 		errLine = "\nError: " + m.err + "\n"

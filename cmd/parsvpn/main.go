@@ -44,6 +44,7 @@ func main() {
 		cmdProfile(),
 		cmdRoute(),
 		cmdHost(),
+		cmdDNS(),
 		cmdSplit(),
 		cmdUpdate(),
 	)
@@ -123,13 +124,28 @@ func cmdStatus() *cobra.Command {
 				fmt.Println("status: inactive")
 				return nil
 			}
-			fmt.Printf("status: active\nprofile: %s\ninterface: %s\naddress: %s\nendpoint: %s\nhandshake: %s\nrx: %d\ntx: %d\nsplit: %s\n",
-				st.Profile, st.Interface, st.Address, st.Endpoint, st.Handshake, st.RxBytes, st.TxBytes, strings.Join(st.SplitIPs, ", "))
+			fmt.Printf("status: active\nprofile: %s\ninterface: %s\naddress: %s\nendpoint: %s\nhandshake: %s\nrx: %d\ntx: %d\nsplit: %s\ndns: override=%s servers=%s\n",
+				st.Profile, st.Interface, st.Address, st.Endpoint, st.Handshake, st.RxBytes, st.TxBytes, strings.Join(st.SplitIPs, ", "),
+				boolOnOff(st.DNSOverride), dnsServersDisplay(st.DNSServers))
 			return nil
 		},
 	}
 	c.Flags().BoolVar(&asJSON, "json", false, "output JSON")
 	return c
+}
+
+func boolOnOff(v bool) string {
+	if v {
+		return "on"
+	}
+	return "off"
+}
+
+func dnsServersDisplay(servers []string) string {
+	if len(servers) == 0 {
+		return "-"
+	}
+	return strings.Join(servers, ",")
 }
 
 func cmdProfile() *cobra.Command {
@@ -367,6 +383,114 @@ tunnel (exclude mode, or by temporarily routing the resolver in include mode).`,
 	}
 	root.AddCommand(listCmd, add, rm)
 	return root
+}
+
+func cmdDNS() *cobra.Command {
+	root := &cobra.Command{
+		Use:   "dns",
+		Short: "Override system DNS while the tunnel is up (bypass ISP filtering)",
+		Long: `Manage system DNS override for a profile.
+
+When override is on, ParsVPN runs an embedded resolver on 127.0.0.199 and
+points systemd-resolved / resolv.conf at it. Queries are forwarded through the
+tunnel to the profile DNS servers (or 1.1.1.1). This fixes filtered answers
+like youtube.com → 10.10.34.35 from ISP resolvers.
+
+Importing a WireGuard conf with DNS= enables override automatically.`,
+	}
+	showCmd := &cobra.Command{
+		Use:   "show <profile>",
+		Short: "Show DNS override flag and upstream servers",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := profile.Load(args[0])
+			if err != nil {
+				return err
+			}
+			servers := p.DNS
+			if len(servers) == 0 {
+				servers = []string{p.UpstreamDNSHost() + " (default)"}
+			}
+			fmt.Printf("profile: %s\noverride: %s\nservers: %s\n",
+				p.Name, boolOnOff(p.OverrideSystemDNS), strings.Join(servers, ", "))
+			return nil
+		},
+	}
+	overrideCmd := &cobra.Command{
+		Use:   "override <profile> <on|off>",
+		Short: "Enable or disable system DNS override while connected",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			on, err := parseOnOff(args[1])
+			if err != nil {
+				return err
+			}
+			p, err := profile.Load(args[0])
+			if err != nil {
+				return err
+			}
+			p.SetOverrideSystemDNS(on)
+			if err := saveProfileAndReload(p); err != nil {
+				return err
+			}
+			fmt.Printf("profile %s dns override=%s servers=%s\n",
+				p.Name, boolOnOff(p.OverrideSystemDNS), dnsServersDisplay(p.DNS))
+			return nil
+		},
+	}
+	setCmd := &cobra.Command{
+		Use:   "set <profile> <ip> [ip...]",
+		Short: "Set upstream DNS servers (and enable override)",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := profile.Load(args[0])
+			if err != nil {
+				return err
+			}
+			if err := p.SetDNSServers(args[1:]...); err != nil {
+				return err
+			}
+			p.SetOverrideSystemDNS(true)
+			if err := saveProfileAndReload(p); err != nil {
+				return err
+			}
+			fmt.Printf("profile %s dns override=on servers=%s\n", p.Name, dnsServersDisplay(p.DNS))
+			return nil
+		},
+	}
+	clearCmd := &cobra.Command{
+		Use:   "clear <profile>",
+		Short: "Clear upstream DNS list (keeps override flag; falls back to 1.1.1.1)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := profile.Load(args[0])
+			if err != nil {
+				return err
+			}
+			if err := p.SetDNSServers(); err != nil {
+				return err
+			}
+			if err := saveProfileAndReload(p); err != nil {
+				return err
+			}
+			fmt.Printf("profile %s dns servers cleared (upstream default %s, override=%s)\n",
+				p.Name, p.UpstreamDNSHost(), boolOnOff(p.OverrideSystemDNS))
+			return nil
+		},
+	}
+	root.AddCommand(showCmd, overrideCmd, setCmd, clearCmd)
+	return root
+}
+
+func parseOnOff(s string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "on", "true", "1", "yes":
+		return true, nil
+	case "off", "false", "0", "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid value %q (use on|off)", s)
+	}
 }
 
 func cmdSplit() *cobra.Command {

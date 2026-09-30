@@ -40,6 +40,12 @@ PersistentKeepalive = 25
 	if p.Peers[0].PersistentKeepalive != 25 {
 		t.Fatalf("keepalive: %d", p.Peers[0].PersistentKeepalive)
 	}
+	if len(p.DNS) != 1 || p.DNS[0] != "10.10.0.53" {
+		t.Fatalf("dns: %#v", p.DNS)
+	}
+	if !p.OverrideSystemDNS {
+		t.Fatal("expected override_system_dns from WireGuard DNS= line")
+	}
 }
 
 func TestImportWireGuardConfContent(t *testing.T) {
@@ -237,6 +243,32 @@ func TestValidateName(t *testing.T) {
 	}
 	if err := ValidateName("office-vpn"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDNSOverrideHelpers(t *testing.T) {
+	p := &Profile{Name: "d", PrivateKey: "k"}
+	if p.NeedsDNSProxy() {
+		t.Fatal("expected no proxy by default")
+	}
+	p.SetOverrideSystemDNS(true)
+	if !p.NeedsDNSProxy() {
+		t.Fatal("override should need proxy")
+	}
+	if p.UpstreamDNSHost() != "1.1.1.1" {
+		t.Fatalf("default upstream: %s", p.UpstreamDNSHost())
+	}
+	if err := p.SetDNSServers("8.8.8.8", "1.1.1.1", "8.8.8.8"); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.DNS) != 2 || p.DNS[0] != "8.8.8.8" || p.DNS[1] != "1.1.1.1" {
+		t.Fatalf("dns: %#v", p.DNS)
+	}
+	if p.UpstreamDNSHost() != "8.8.8.8" {
+		t.Fatalf("upstream: %s", p.UpstreamDNSHost())
+	}
+	if err := p.SetDNSServers("not-an-ip"); err == nil {
+		t.Fatal("expected invalid DNS error")
 	}
 }
 

@@ -10,11 +10,11 @@ import (
 
 type nopAdapter struct{}
 
-func (nopAdapter) Apply([]string) error { return nil }
-func (nopAdapter) Restore() error       { return nil }
+func (nopAdapter) Apply(ApplyOpts) error { return nil }
+func (nopAdapter) Restore() error        { return nil }
 
 func TestProxyOverride(t *testing.T) {
-	p := NewProxy([]profile.HostOverride{{Domain: "db.internal", IP: "10.10.0.50"}}, "1.1.1.1:53", nopAdapter{})
+	p := NewProxy([]profile.HostOverride{{Domain: "db.internal", IP: "10.10.0.50"}}, "1.1.1.1:53", nopAdapter{}, false)
 	// Directly exercise handle via a local UDP server on an ephemeral port.
 	mux := dns.NewServeMux()
 	mux.HandleFunc(".", p.handle)

@@ -53,10 +53,14 @@ type Profile struct {
 	PrivateKey string      `json:"private_key"`
 	Address    string      `json:"address"`
 	ListenPort int         `json:"listen_port,omitempty"`
-	DNS        []string    `json:"dns,omitempty"`
-	MTU        int         `json:"mtu,omitempty"`
-	Peers      []Peer      `json:"peers"`
-	SplitTunnel SplitTunnel `json:"split_tunnel"`
+	// DNS is the upstream resolver list (used by the embedded proxy / host pin).
+	DNS []string `json:"dns,omitempty"`
+	// OverrideSystemDNS routes all system DNS via the embedded proxy while the
+	// tunnel is up (avoids ISP filtering). Upstream is DNS[0] or 1.1.1.1.
+	OverrideSystemDNS bool `json:"override_system_dns,omitempty"`
+	MTU               int  `json:"mtu,omitempty"`
+	Peers             []Peer      `json:"peers"`
+	SplitTunnel       SplitTunnel `json:"split_tunnel"`
 }
 
 var nameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
@@ -473,6 +477,42 @@ func (p *Profile) UpstreamDNSHost() string {
 		}
 	}
 	return "1.1.1.1"
+}
+
+// SetOverrideSystemDNS enables or disables catch-all system DNS while connected.
+func (p *Profile) SetOverrideSystemDNS(on bool) {
+	p.OverrideSystemDNS = on
+}
+
+// SetDNSServers replaces the profile DNS list. Empty clears it (proxy falls back to 1.1.1.1).
+func (p *Profile) SetDNSServers(servers ...string) error {
+	out := make([]string, 0, len(servers))
+	seen := map[string]struct{}{}
+	for _, s := range servers {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		host := s
+		if h, _, err := net.SplitHostPort(s); err == nil {
+			host = h
+		}
+		if net.ParseIP(host) == nil {
+			return fmt.Errorf("invalid DNS server %q (IP required)", s)
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		out = append(out, host)
+	}
+	p.DNS = out
+	return nil
+}
+
+// NeedsDNSProxy reports whether the embedded DNS listener should run.
+func (p *Profile) NeedsDNSProxy() bool {
+	return p.OverrideSystemDNS || len(p.SplitTunnel.HostOverrides) > 0
 }
 
 // PinHost sets a host override and adds the IP as a /32 (or /128) tunnel route.
