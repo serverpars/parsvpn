@@ -38,8 +38,13 @@ sudo parsvpn up office
 parsvpn status --json
 sudo parsvpn down
 
-# Interactive dashboard (press [a] to add a profile)
+# Interactive dashboard (press [a] to add a profile, [u] to update)
 sudo parsvpn
+
+# Check / install updates (daemon also auto-updates by default)
+parsvpn update --check
+sudo parsvpn update
+sudo parsvpn update --disable-auto   # opt out of autopilot
 ```
 
 Daemon (started by systemd):
@@ -81,9 +86,17 @@ Profiles live in `/etc/parsvpn/profiles/<name>.json` (`0600`). Importing a `.con
 | Interface | `pv-tun0` |
 | Table | `51920` |
 | Rule prefs | `15190–15199` |
-| Config | `/etc/parsvpn/profiles/` |
+| Config | `/etc/parsvpn/` (`profiles/`, `config.json`) |
 | Socket | `/var/run/parsvpn/daemon.sock` |
 | Lock | `/var/run/parsvpn/daemon.lock` |
+
+## Updates
+
+ParsVPN checks GitHub releases (`serverpars/parsvpn`) for newer versions.
+
+- **Autopilot (default):** the daemon polls every 6 hours and installs updates automatically, then restarts itself. Active tunnels are restored after restart.
+- **Manual:** `parsvpn update --check` / `sudo parsvpn update`
+- **Opt out:** `sudo parsvpn update --disable-auto` or set `"auto_update": false` in `/etc/parsvpn/config.json`
 
 ## Development
 

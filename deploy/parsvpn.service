@@ -7,7 +7,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/parsvpn daemon
-Restart=on-failure
+Restart=always
 RestartSec=2
 # Root required for TUN, netlink policy routing, and DNS :53 bind.
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE

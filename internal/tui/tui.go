@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/serverpars/parsvpn/internal/constants"
 	"github.com/serverpars/parsvpn/internal/ipc"
 	"github.com/serverpars/parsvpn/internal/profile"
+	"github.com/serverpars/parsvpn/internal/update"
 )
 
 var (
@@ -51,17 +53,19 @@ func (i item) Description() string { return "" }
 func (i item) FilterValue() string { return i.name }
 
 type model struct {
-	mode       mode
-	list       list.Model
-	status     ipc.StatusPayload
-	err        string
-	notice     string
-	width      int
-	height     int
-	picker     filepicker.Model
-	nameInput  textinput.Model
-	addPath    string
-	deleteName string
+	mode          mode
+	list          list.Model
+	status        ipc.StatusPayload
+	err           string
+	notice        string
+	width         int
+	height        int
+	picker        filepicker.Model
+	nameInput     textinput.Model
+	addPath       string
+	deleteName    string
+	updateVersion string
+	updating      bool
 }
 
 type tickMsg struct{}
@@ -79,6 +83,15 @@ type profilesMsg struct {
 type opDoneMsg struct {
 	err     error
 	message string
+}
+
+type updateAvailableMsg struct {
+	version string
+}
+
+type updateAppliedMsg struct {
+	version string
+	err     error
 }
 
 func Run() error {
@@ -131,13 +144,39 @@ func newModel(names []string, st ipc.StatusPayload) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(refreshStatus, scheduleTick())
+	return tea.Batch(refreshStatus, scheduleTick(), checkUpdate)
 }
 
 func scheduleTick() tea.Cmd {
 	return tea.Tick(time.Duration(constants.HandshakePollIntervalSec)*time.Second, func(time.Time) tea.Msg {
 		return tickMsg{}
 	})
+}
+
+func checkUpdate() tea.Msg {
+	ctx, cancel := context.WithTimeout(context.Background(), constants.UpdateCheckTimeout)
+	defer cancel()
+	rel, err := update.Check(ctx, constants.Version)
+	if err != nil || rel == nil {
+		return nil
+	}
+	return updateAvailableMsg{version: rel.Version}
+}
+
+func applyUpdate() tea.Msg {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	rel, err := update.Check(ctx, constants.Version)
+	if err == update.ErrNoUpdate {
+		return updateAppliedMsg{version: constants.Version}
+	}
+	if err != nil {
+		return updateAppliedMsg{err: err}
+	}
+	if err := update.Apply(ctx, rel); err != nil {
+		return updateAppliedMsg{err: err}
+	}
+	return updateAppliedMsg{version: rel.Version}
 }
 
 func refreshStatus() tea.Msg {
@@ -201,6 +240,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.deleteName = ""
 		m.nameInput.Blur()
 		return m, tea.Batch(refreshProfiles, refreshStatus)
+	case updateAvailableMsg:
+		m.updateVersion = msg.version
+	case updateAppliedMsg:
+		m.updating = false
+		if msg.err != nil {
+			m.err = msg.err.Error()
+		} else {
+			m.err = ""
+			m.notice = fmt.Sprintf("updated to %s — restarting", update.FormatVersion(msg.version))
+			m.updateVersion = ""
+		}
 	case tea.KeyMsg:
 		switch m.mode {
 		case modeAddFile:
@@ -253,6 +303,14 @@ func (m model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.notice = ""
 		m.addPath = ""
 		return m, m.picker.Init()
+	case "u":
+		if m.updateVersion == "" || m.updating {
+			return m, nil
+		}
+		m.updating = true
+		m.notice = "downloading update..."
+		m.err = ""
+		return m, applyUpdate
 	case "d":
 		it, ok := m.list.SelectedItem().(item)
 		if !ok {
@@ -445,6 +503,10 @@ func (m model) viewBrowse() string {
 	} else {
 		detail.WriteString("No active tunnel.\nSelect a profile and press Space to connect.\n")
 	}
+	if m.updateVersion != "" {
+		detail.WriteString(fmt.Sprintf("\nUpdate available: %s (press [u] to install)\n",
+			update.FormatVersion(m.updateVersion)))
+	}
 	if m.notice != "" {
 		detail.WriteString("\n" + m.notice + "\n")
 	}
@@ -453,7 +515,7 @@ func (m model) viewBrowse() string {
 	}
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, m.list.View(), detailStyle.Render(detail.String()))
-	help := helpStyle.Render("[Space] Toggle  [a] Add  [d] Delete  [r] Refresh  [q] Quit")
+	help := helpStyle.Render("[Space] Toggle  [a] Add  [d] Delete  [u] Update  [r] Refresh  [q] Quit")
 	return header + "\n\n" + body + "\n\n" + help
 }
 

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/serverpars/parsvpn/internal/ipc"
 	"github.com/serverpars/parsvpn/internal/neteng"
 	"github.com/serverpars/parsvpn/internal/profile"
+	"github.com/serverpars/parsvpn/internal/update"
 	"github.com/serverpars/parsvpn/internal/wg"
 )
 
@@ -73,7 +75,7 @@ func (d *Daemon) Run() error {
 	go func() {
 		for sig := range sigCh {
 			log.Printf("signal %v — shutting down", sig)
-			_ = d.Down()
+			_ = d.shutdown()
 			close(d.stopCh)
 			_ = ln.Close()
 			return
@@ -82,6 +84,8 @@ func (d *Daemon) Run() error {
 
 	go d.healthLoop()
 	go d.healLoop()
+	go d.updateLoop()
+	go d.restoreWanted()
 
 	log.Printf("parsvpn daemon listening on %s", constants.SocketPath)
 	for {
@@ -191,6 +195,7 @@ func (d *Daemon) Up(name string) error {
 	}
 
 	d.active = p
+	_ = os.WriteFile(constants.WantedPath, []byte(p.Name+"\n"), 0o600)
 	_ = d.persistStateLocked()
 	if err := d.net.WatchLinkDeleted(d.stopCh, func() {
 		select {
@@ -204,8 +209,18 @@ func (d *Daemon) Up(name string) error {
 	return nil
 }
 
-// Down tears down the active session.
+// Down tears down the active session and clears the auto-restore marker
+// (explicit user disconnect).
 func (d *Daemon) Down() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_ = os.Remove(constants.WantedPath)
+	return d.downLocked()
+}
+
+// shutdown tears down networking but keeps wanted_profile so a service
+// restart (including autopilot update) can restore the tunnel.
+func (d *Daemon) shutdown() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.downLocked()
@@ -318,12 +333,69 @@ func (d *Daemon) healLoop() {
 			}
 			log.Printf("interface %s deleted — auto-heal", constants.IfaceName)
 			name := p.Name
-			_ = d.Down()
+			_ = d.shutdown()
 			if err := d.Up(name); err != nil {
 				log.Printf("auto-heal failed: %v", err)
 			}
 		}
 	}
+}
+
+func (d *Daemon) restoreWanted() {
+	data, err := os.ReadFile(constants.WantedPath)
+	if err != nil {
+		return
+	}
+	name := strings.TrimSpace(string(data))
+	if name == "" {
+		return
+	}
+	log.Printf("restoring wanted profile %q", name)
+	if err := d.Up(name); err != nil {
+		log.Printf("restore profile %q failed: %v", name, err)
+	}
+}
+
+func (d *Daemon) updateLoop() {
+	cfg := update.LoadConfig()
+	interval := cfg.CheckInterval()
+	// Small initial delay so boot is not blocked on GitHub.
+	timer := time.NewTimer(2 * time.Minute)
+	defer timer.Stop()
+	for {
+		select {
+		case <-d.stopCh:
+			return
+		case <-timer.C:
+			d.maybeAutoUpdate()
+			cfg = update.LoadConfig()
+			interval = cfg.CheckInterval()
+			timer.Reset(interval)
+		}
+	}
+}
+
+func (d *Daemon) maybeAutoUpdate() {
+	cfg := update.LoadConfig()
+	if !cfg.AutoUpdate {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), constants.UpdateCheckTimeout+2*time.Minute)
+	defer cancel()
+	rel, err := update.Check(ctx, constants.Version)
+	if err == update.ErrNoUpdate {
+		return
+	}
+	if err != nil {
+		log.Printf("update check: %v", err)
+		return
+	}
+	log.Printf("autopilot update: %s -> %s", constants.Version, update.FormatVersion(rel.Version))
+	if err := update.Apply(ctx, rel); err != nil {
+		log.Printf("autopilot update failed: %v", err)
+		return
+	}
+	log.Printf("autopilot update applied — service restarting")
 }
 
 func (d *Daemon) persistState() error {

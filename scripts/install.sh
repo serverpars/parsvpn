@@ -42,6 +42,15 @@ install -m 0755 "${src}" "${INSTALL_BIN}"
 mkdir -p /etc/parsvpn/profiles /var/run/parsvpn
 chmod 0700 /etc/parsvpn /etc/parsvpn/profiles /var/run/parsvpn
 
+if [[ ! -f /etc/parsvpn/config.json ]]; then
+  cat >/etc/parsvpn/config.json <<'EOF'
+{
+  "auto_update": true
+}
+EOF
+  chmod 0600 /etc/parsvpn/config.json
+fi
+
 if [[ -f "${UNIT_SRC}" ]]; then
   install -m 0644 "${UNIT_SRC}" /etc/systemd/system/parsvpn.service
 else
@@ -54,7 +63,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/parsvpn daemon
-Restart=on-failure
+Restart=always
 RestartSec=2
 
 [Install]
@@ -68,3 +77,5 @@ echo "ParsVPN installed. Import a profile:"
 echo "  parsvpn profile add --file /path/to/wg.conf"
 echo "  parsvpn up <name>"
 echo "  parsvpn   # interactive TUI"
+echo "  parsvpn update --check"
+echo "Autopilot updates are enabled (disable: parsvpn update --disable-auto)"

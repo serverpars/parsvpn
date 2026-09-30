@@ -1,16 +1,20 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/serverpars/parsvpn/internal/constants"
 	"github.com/serverpars/parsvpn/internal/daemon"
 	"github.com/serverpars/parsvpn/internal/ipc"
 	"github.com/serverpars/parsvpn/internal/profile"
 	"github.com/serverpars/parsvpn/internal/tui"
+	"github.com/serverpars/parsvpn/internal/update"
 	"github.com/spf13/cobra"
 )
 
@@ -37,6 +41,7 @@ func main() {
 		cmdDown(),
 		cmdStatus(),
 		cmdProfile(),
+		cmdUpdate(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -179,4 +184,81 @@ func cmdProfile() *cobra.Command {
 	}
 	root.AddCommand(add, listCmd, del)
 	return root
+}
+
+func cmdUpdate() *cobra.Command {
+	var checkOnly bool
+	var force bool
+	var enableAuto, disableAuto bool
+	c := &cobra.Command{
+		Use:   "update",
+		Short: "Check for and install ParsVPN updates from GitHub releases",
+		Long: `Check GitHub for a newer ParsVPN release and install it.
+
+By default the daemon autopilot also checks every few hours and applies
+updates automatically. Disable with --disable-auto or config auto_update=false.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if enableAuto && disableAuto {
+				return fmt.Errorf("use only one of --enable-auto / --disable-auto")
+			}
+			if enableAuto || disableAuto {
+				cfg := update.LoadConfig()
+				cfg.AutoUpdate = enableAuto
+				if err := update.SaveConfig(cfg); err != nil {
+					return err
+				}
+				state := "enabled"
+				if !cfg.AutoUpdate {
+					state = "disabled"
+				}
+				fmt.Printf("autopilot updates %s (%s)\n", state, constants.ConfigPath)
+				if !checkOnly && !force {
+					return nil
+				}
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+
+			rel, err := update.Check(ctx, Version)
+			if errors.Is(err, update.ErrNoUpdate) {
+				if !force {
+					ver := Version
+					if rel != nil {
+						ver = update.FormatVersion(rel.Version)
+					}
+					fmt.Printf("parsvpn %s is up to date\n", ver)
+					return nil
+				}
+				// --force: re-install latest even when versions match
+			} else if err != nil {
+				return err
+			}
+			if rel == nil {
+				return fmt.Errorf("no release information")
+			}
+			if !errors.Is(err, update.ErrNoUpdate) {
+				fmt.Printf("update available: %s -> %s\n", Version, update.FormatVersion(rel.Version))
+			} else {
+				fmt.Printf("reinstalling %s\n", update.FormatVersion(rel.Version))
+			}
+			if rel.HTMLURL != "" {
+				fmt.Println(rel.HTMLURL)
+			}
+			if checkOnly {
+				return nil
+			}
+			fmt.Printf("downloading %s ...\n", rel.AssetName)
+			if err := update.Apply(ctx, rel); err != nil {
+				return err
+			}
+			fmt.Printf("updated to %s (service restarted)\n", update.FormatVersion(rel.Version))
+			return nil
+		},
+	}
+	c.Flags().BoolVar(&checkOnly, "check", false, "only check; do not install")
+	c.Flags().BoolVar(&force, "force", false, "install even if version looks equal (re-download latest)")
+	c.Flags().BoolVar(&enableAuto, "enable-auto", false, "enable daemon autopilot updates")
+	c.Flags().BoolVar(&disableAuto, "disable-auto", false, "disable daemon autopilot updates")
+	return c
 }
