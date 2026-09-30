@@ -337,15 +337,22 @@ func (d *Daemon) statusLocked() ipc.StatusPayload {
 	st.Profile = d.active.Name
 	st.Address = d.active.Address
 	if d.active.EffectiveMode() == profile.SplitModeExclude {
-		if bypass, err := d.active.BypassCIDRs(); err == nil {
-			st.SplitIPs = bypass
-			if len(st.SplitIPs) > 8 {
-				st.SplitIPs = append(st.SplitIPs[:8], fmt.Sprintf("... +%d more (exclude)", len(bypass)-8))
-			}
+		preset := d.active.SplitTunnel.BypassPreset
+		if preset == "" {
+			preset = "none"
 		}
-		st.SplitIPs = append([]string{"mode=exclude"}, st.SplitIPs...)
+		bypassN := 0
+		if bypass, err := d.active.BypassCIDRs(); err == nil {
+			bypassN = len(bypass)
+		}
+		st.SplitIPs = []string{
+			fmt.Sprintf("mode=exclude preset=%s total_bypass=%d", preset, bypassN),
+		}
+		for _, c := range d.active.SplitTunnel.IPRanges {
+			st.SplitIPs = append(st.SplitIPs, "bypass:"+c)
+		}
 	} else {
-		st.SplitIPs = d.active.DestinationCIDRs()
+		st.SplitIPs = append([]string{"mode=include"}, d.active.DestinationCIDRs()...)
 	}
 	st.Userspace = d.wg != nil && d.wg.Userspace()
 	if len(d.active.Peers) > 0 {

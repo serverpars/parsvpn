@@ -39,6 +39,12 @@ const (
 	modeAddPaste
 	modeAddName
 	modeConfirmDelete
+	modeEditMenu
+	modeEditRoutes
+	modeEditRouteAdd
+	modeEditHosts
+	modeEditHostAdd
+	modeEditSplit
 )
 
 type addSource int
@@ -81,6 +87,8 @@ type model struct {
 	updateVersion string
 	updating      bool
 	needsReexec   bool
+	editProfile   string
+	editList      list.Model
 }
 
 type tickMsg struct{}
@@ -169,7 +177,7 @@ func newModel(names []string, st ipc.StatusPayload) model {
 	ta.SetWidth(60)
 	ta.SetHeight(12)
 
-	return model{list: l, status: st, picker: fp, nameInput: ti, pasteArea: ta}
+	return model{list: l, status: st, picker: fp, nameInput: ti, pasteArea: ta, editList: newEditList()}
 }
 
 func (m model) Init() tea.Cmd {
@@ -239,6 +247,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.picker.SetHeight(max(8, msg.Height-10))
 		m.pasteArea.SetWidth(max(40, msg.Width-4))
 		m.pasteArea.SetHeight(max(8, msg.Height-10))
+		m.editList.SetSize(max(30, msg.Width-4), max(8, msg.Height-12))
 	case tickMsg:
 		if m.mode == modeBrowse {
 			return m, tea.Batch(refreshStatus, scheduleTick())
@@ -274,6 +283,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pasteArea.Blur()
 		m.pasteArea.Reset()
 		return m, tea.Batch(refreshProfiles, refreshStatus)
+	case editDoneMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			m.notice = ""
+		} else {
+			m.err = ""
+			m.notice = msg.message
+		}
+		m.nameInput.Blur()
+		m.nameInput.Placeholder = "profile-name"
+		var cmd tea.Cmd
+		var next tea.Model
+		switch msg.reopen {
+		case "routes":
+			next, cmd = m.openEditRoutes()
+			m = next.(model)
+		case "hosts":
+			next, cmd = m.openEditHosts()
+			m = next.(model)
+		case "split":
+			m.mode = modeEditSplit
+		default:
+			m.mode = modeEditMenu
+		}
+		return m, tea.Batch(cmd, refreshStatus)
 	case updateAvailableMsg:
 		m.updateVersion = msg.version
 	case updateAppliedMsg:
@@ -299,6 +333,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateAddName(msg)
 		case modeConfirmDelete:
 			return m.updateConfirmDelete(msg)
+		case modeEditMenu:
+			return m.updateEditMenu(msg)
+		case modeEditRoutes:
+			return m.updateEditRoutes(msg)
+		case modeEditRouteAdd:
+			return m.updateEditRouteAdd(msg)
+		case modeEditHosts:
+			return m.updateEditHosts(msg)
+		case modeEditHostAdd:
+			return m.updateEditHostAdd(msg)
+		case modeEditSplit:
+			return m.updateEditSplit(msg)
 		default:
 			return m.updateBrowse(msg)
 		}
@@ -316,9 +362,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.pasteArea, cmd = m.pasteArea.Update(msg)
 		return m, cmd
-	case modeAddName:
+	case modeAddName, modeEditRouteAdd, modeEditHostAdd:
 		var cmd tea.Cmd
 		m.nameInput, cmd = m.nameInput.Update(msg)
+		return m, cmd
+	case modeEditRoutes, modeEditHosts:
+		var cmd tea.Cmd
+		m.editList, cmd = m.editList.Update(msg)
 		return m, cmd
 	default:
 		var cmd tea.Cmd
@@ -371,6 +421,9 @@ func (m model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.err = ""
 		m.notice = ""
 		return m, nil
+	case "e":
+		next, cmd := m.beginEdit()
+		return next, cmd
 	}
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
@@ -608,6 +661,18 @@ func (m model) View() string {
 		return m.viewAddName()
 	case modeConfirmDelete:
 		return m.viewConfirmDelete()
+	case modeEditMenu:
+		return m.viewEditMenu()
+	case modeEditRoutes:
+		return m.viewEditRoutes()
+	case modeEditRouteAdd:
+		return m.viewEditRouteAdd()
+	case modeEditHosts:
+		return m.viewEditHosts()
+	case modeEditHostAdd:
+		return m.viewEditHostAdd()
+	case modeEditSplit:
+		return m.viewEditSplit()
 	default:
 		return m.viewBrowse()
 	}
@@ -627,7 +692,12 @@ func (m model) viewBrowse() string {
 		detail.WriteString(fmt.Sprintf("Handshake: %s\n", m.status.Handshake))
 		detail.WriteString(fmt.Sprintf("Transfer:  %s RX / %s TX\n", humanBytes(m.status.RxBytes), humanBytes(m.status.TxBytes)))
 		detail.WriteString("----------------------------------------------\n")
-		detail.WriteString(fmt.Sprintf("Split IPs: %s\n", strings.Join(m.status.SplitIPs, ", ")))
+		if len(m.status.SplitIPs) > 0 {
+			detail.WriteString("Split: " + m.status.SplitIPs[0] + "\n")
+			if len(m.status.SplitIPs) > 1 {
+				detail.WriteString("  " + strings.Join(m.status.SplitIPs[1:], "\n  ") + "\n")
+			}
+		}
 		if len(m.status.Overrides) > 0 {
 			detail.WriteString("Host Overrides:\n")
 			for _, o := range m.status.Overrides {
@@ -637,7 +707,7 @@ func (m model) viewBrowse() string {
 	} else if len(m.list.Items()) == 0 {
 		detail.WriteString("No profiles yet.\nPress [a] to add a profile (file, paste, or empty tunnel).\n")
 	} else {
-		detail.WriteString("No active tunnel.\nSelect a profile and press Space to connect.\n")
+		detail.WriteString("No active tunnel.\nSelect a profile and press Space to connect.\nPress [e] to edit routes / hosts / split mode.\n")
 	}
 	if m.updateVersion != "" {
 		detail.WriteString(fmt.Sprintf("\nUpdate available: %s (press [u] to install)\n",
@@ -651,7 +721,7 @@ func (m model) viewBrowse() string {
 	}
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, m.list.View(), detailStyle.Render(detail.String()))
-	help := helpStyle.Render("[Space] Toggle  [a] Add  [d] Delete  [u] Update  [r] Refresh  [q] Quit")
+	help := helpStyle.Render("[Space] Toggle  [a] Add  [e] Edit  [d] Delete  [u] Update  [r] Refresh  [q] Quit")
 	return header + "\n\n" + body + "\n\n" + help
 }
 

@@ -4,7 +4,7 @@ import "time"
 
 const (
 	AppName    = "parsvpn"
-	Version    = "1.3.0"
+	Version    = "1.3.1"
 	IfaceName  = "pv-tun0"
 	RouteTable = 51920
 	// FwMark is reserved for a future full-tunnel path; v1 uses destination-based rules only.

@@ -45,7 +45,7 @@ sudo parsvpn up office
 parsvpn status --json
 sudo parsvpn down
 
-# Interactive dashboard (press [a] to add: file, paste, or empty tunnel)
+# Interactive dashboard (press [a] to add; [e] to edit routes/hosts/split)
 sudo parsvpn
 
 # Check / install updates (daemon also auto-updates by default)
