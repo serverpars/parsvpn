@@ -161,10 +161,10 @@ Profiles live in `/etc/parsvpn/profiles/<name>.json` (`0600`). Importing a `.con
 
 ParsVPN checks GitHub releases (`serverpars/parsvpn`) for newer versions.
 
-- **Autopilot (default):** the daemon polls every 6 hours and installs updates automatically, then restarts itself. Active tunnels are restored after restart.
-- **Auto-connect (default):** after reboot, the daemon brings up the last profile from `parsvpn up`. Disable with `parsvpn autostart off` or `"auto_connect": false` in `/etc/parsvpn/config.json`. Explicit `parsvpn down` clears the saved profile.
+- **Autopilot / autoupdate (default on):** the daemon checks GitHub ~45s after start, then about every hour, and installs newer releases unattended (service restart). Toggle: `parsvpn autoupdate on|off`.
+- **Auto-connect (default on):** after reboot, the daemon brings up the last profile from `parsvpn up`. Disable with `parsvpn autostart off` or `"auto_connect": false` in `/etc/parsvpn/config.json`. Explicit `parsvpn down` clears the saved profile.
 - **Manual:** `parsvpn update --check` / `sudo parsvpn update` (CLI/TUI re-exec into the new binary after install)
-- **Opt out of updates:** `sudo parsvpn update --disable-auto` or set `"auto_update": false` in `/etc/parsvpn/config.json`
+- **Opt out of updates:** `sudo parsvpn autoupdate off` or `sudo parsvpn update --disable-auto` or `"auto_update": false` in `/etc/parsvpn/config.json`
 
 ## Development
 

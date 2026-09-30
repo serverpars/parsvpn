@@ -431,6 +431,7 @@ func (d *Daemon) statusLocked() ipc.StatusPayload {
 	}
 	cfg := update.LoadConfig()
 	st.AutoConnect = cfg.AutoConnect
+	st.AutoUpdate = cfg.AutoUpdate
 	st.AutostartProfile = readWanted()
 	if st.Healing {
 		if name, ok := d.healingProfile.Load().(string); ok && name != "" {
@@ -660,8 +661,13 @@ func readWanted() string {
 func (d *Daemon) updateLoop() {
 	cfg := update.LoadConfig()
 	interval := cfg.CheckInterval()
-	// Small initial delay so boot is not blocked on GitHub.
-	timer := time.NewTimer(2 * time.Minute)
+	if cfg.AutoUpdate {
+		log.Printf("autopilot updates enabled (first check in %s, then every %s)",
+			constants.AutoUpdateInitialDelay, interval)
+	} else {
+		log.Printf("autopilot updates disabled (enable: parsvpn autoupdate on)")
+	}
+	timer := time.NewTimer(constants.AutoUpdateInitialDelay)
 	defer timer.Stop()
 	for {
 		select {
@@ -691,12 +697,12 @@ func (d *Daemon) maybeAutoUpdate() {
 		log.Printf("update check: %v", err)
 		return
 	}
-	log.Printf("autopilot update: %s -> %s", constants.Version, update.FormatVersion(rel.Version))
+	log.Printf("autopilot: new release %s available — installing unattended", update.FormatVersion(rel.Version))
 	if err := update.Apply(ctx, rel); err != nil {
 		log.Printf("autopilot update failed: %v", err)
 		return
 	}
-	log.Printf("autopilot update applied — service restarting")
+	log.Printf("autopilot update applied %s — restarting service", update.FormatVersion(rel.Version))
 }
 
 func (d *Daemon) persistState() error {

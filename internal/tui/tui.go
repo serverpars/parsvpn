@@ -664,7 +664,8 @@ func (m *model) syncActiveFlags() {
 	items := m.list.Items()
 	for i, it := range items {
 		if ii, ok := it.(item); ok {
-			ii.active = m.status.Active && m.status.Profile == ii.name
+			ii.active = (m.status.Active && m.status.Profile == ii.name) ||
+				(m.status.Healing && m.status.Profile == ii.name)
 			items[i] = ii
 		}
 	}
@@ -833,6 +834,11 @@ func (m model) viewBrowse() string {
 			wanted = "-"
 		}
 		detail.WriteString(fmt.Sprintf("Autostart: %s (reconnects as %s)\n", auto, wanted))
+		au := "off"
+		if m.status.AutoUpdate {
+			au = "on"
+		}
+		detail.WriteString(fmt.Sprintf("Autoupdate: %s\n", au))
 		if len(m.status.Overrides) > 0 {
 			detail.WriteString("Host Overrides:\n")
 			for _, o := range m.status.Overrides {

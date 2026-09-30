@@ -49,6 +49,7 @@ func main() {
 		cmdSplit(),
 		cmdPreset(),
 		cmdAutostart(),
+		cmdAutoupdate(),
 		cmdTraffic(),
 		cmdUpdate(),
 	)
@@ -125,19 +126,19 @@ func cmdStatus() *cobra.Command {
 			}
 			st := resp.Status
 			if st.Healing {
-				fmt.Printf("status: healing\nprofile: %s\ninterface: %s\nautostart: %s\nreconnects as: %s\n",
-					orDash(st.Profile), st.Interface, boolOnOff(st.AutoConnect), orDash(st.AutostartProfile))
+				fmt.Printf("status: healing\nprofile: %s\ninterface: %s\nautostart: %s\nreconnects as: %s\nautoupdate: %s\n",
+					orDash(st.Profile), st.Interface, boolOnOff(st.AutoConnect), orDash(st.AutostartProfile), boolOnOff(st.AutoUpdate))
 				return nil
 			}
 			if !st.Active {
-				fmt.Printf("status: inactive\nautostart: %s\nreconnects as: %s\n",
-					boolOnOff(st.AutoConnect), orDash(st.AutostartProfile))
+				fmt.Printf("status: inactive\nautostart: %s\nreconnects as: %s\nautoupdate: %s\n",
+					boolOnOff(st.AutoConnect), orDash(st.AutostartProfile), boolOnOff(st.AutoUpdate))
 				return nil
 			}
-			fmt.Printf("status: active\nprofile: %s\ninterface: %s\naddress: %s\nendpoint: %s\nhandshake: %s\nrx: %d\ntx: %d\nsplit: %s\ndns: override=%s servers=%s\nautostart: %s\nreconnects as: %s\n",
+			fmt.Printf("status: active\nprofile: %s\ninterface: %s\naddress: %s\nendpoint: %s\nhandshake: %s\nrx: %d\ntx: %d\nsplit: %s\ndns: override=%s servers=%s\nautostart: %s\nreconnects as: %s\nautoupdate: %s\n",
 				st.Profile, st.Interface, st.Address, st.Endpoint, st.Handshake, st.RxBytes, st.TxBytes, strings.Join(st.SplitIPs, ", "),
 				boolOnOff(st.DNSOverride), dnsServersDisplay(st.DNSServers),
-				boolOnOff(st.AutoConnect), orDash(st.AutostartProfile))
+				boolOnOff(st.AutoConnect), orDash(st.AutostartProfile), boolOnOff(st.AutoUpdate))
 			return nil
 		},
 	}
@@ -832,6 +833,47 @@ Also set "auto_connect": true|false in /etc/parsvpn/config.json.`,
 	return c
 }
 
+func cmdAutoupdate() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "autoupdate [on|off]",
+		Short: "Show or set unattended GitHub release updates (default: on)",
+		Long: `Control daemon autopilot updates (default: on).
+
+When enabled, the daemon checks GitHub for a newer release shortly after start,
+then about every hour. If a newer version exists it downloads, installs, and
+restarts the service with no interaction.
+
+  parsvpn autoupdate          # show current setting
+  sudo parsvpn autoupdate on  # enable (default)
+  sudo parsvpn autoupdate off # disable
+
+Also set "auto_update": true|false in /etc/parsvpn/config.json.
+Manual update: sudo parsvpn update`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := update.LoadConfig()
+			if len(args) == 1 {
+				on, err := parseOnOff(args[0])
+				if err != nil {
+					return err
+				}
+				cfg.AutoUpdate = on
+				if err := update.SaveConfig(cfg); err != nil {
+					return err
+				}
+			}
+			fmt.Printf("autoupdate: %s\ninterval: %s\n", boolOnOff(cfg.AutoUpdate), cfg.CheckInterval())
+			if cfg.AutoUpdate {
+				fmt.Println("note: daemon installs newer releases unattended, then restarts")
+			} else {
+				fmt.Println("note: run 'sudo parsvpn update' manually, or enable autoupdate")
+			}
+			return nil
+		},
+	}
+	return c
+}
+
 func orDash(s string) string {
 	if s == "" {
 		return "-"
@@ -848,8 +890,9 @@ func cmdUpdate() *cobra.Command {
 		Short: "Check for and install ParsVPN updates from GitHub releases",
 		Long: `Check GitHub for a newer ParsVPN release and install it.
 
-By default the daemon autopilot also checks every few hours and applies
-updates automatically. Disable with --disable-auto or config auto_update=false.`,
+By default the daemon also checks ~45s after start and about every hour,
+then installs newer releases unattended. Toggle: parsvpn autoupdate on|off
+(or --disable-auto / config auto_update=false).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if enableAuto && disableAuto {
 				return fmt.Errorf("use only one of --enable-auto / --disable-auto")

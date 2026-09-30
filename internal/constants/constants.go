@@ -4,7 +4,7 @@ import "time"
 
 const (
 	AppName    = "parsvpn"
-	Version    = "1.6.1"
+	Version    = "1.6.2"
 	IfaceName  = "pv-tun0"
 	RouteTable = 51920
 	// FwMark is reserved for a future full-tunnel path; v1 uses destination-based rules only.
@@ -42,7 +42,9 @@ const (
 	ServiceName = "parsvpn"
 
 	// DefaultUpdateCheckInterval is how often the daemon polls for a new release.
-	DefaultUpdateCheckInterval = 6 * time.Hour
+	DefaultUpdateCheckInterval = 1 * time.Hour
 	// UpdateCheckTimeout bounds GitHub API and download requests.
 	UpdateCheckTimeout = 30 * time.Second
+	// AutoUpdateInitialDelay is how long after daemon start before the first check.
+	AutoUpdateInitialDelay = 45 * time.Second
 )
