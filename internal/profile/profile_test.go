@@ -293,6 +293,51 @@ func TestAddRemoveRoutesAndHosts(t *testing.T) {
 	}
 }
 
+func TestSetBypassPresetNoneFallsBackToInclude(t *testing.T) {
+	p := &Profile{
+		Name:       "r",
+		PrivateKey: "k",
+		Address:    "10.0.0.2/32",
+		Peers:      []Peer{{PublicKey: "p", AllowedIPs: []string{"0.0.0.0/0", "10.0.0.0/8"}}},
+		SplitTunnel: SplitTunnel{
+			Mode:         SplitModeExclude,
+			BypassPreset: "ir",
+		},
+	}
+	if err := p.SetBypassPreset("none"); err != nil {
+		t.Fatal(err)
+	}
+	if p.SplitTunnel.BypassPreset != "" {
+		t.Fatalf("preset: %q", p.SplitTunnel.BypassPreset)
+	}
+	if p.EffectiveMode() != SplitModeInclude {
+		t.Fatalf("clearing ir with no manual bypass should return to include, got %s", p.EffectiveMode())
+	}
+}
+
+func TestSetBypassPresetNoneKeepsExcludeWithManualBypass(t *testing.T) {
+	p := &Profile{
+		Name:       "r",
+		PrivateKey: "k",
+		Address:    "10.0.0.2/32",
+		Peers:      []Peer{{PublicKey: "p", AllowedIPs: []string{"0.0.0.0/0"}}},
+		SplitTunnel: SplitTunnel{
+			Mode:         SplitModeExclude,
+			BypassPreset: "ir",
+			IPRanges:     []string{"203.0.113.0/24"},
+		},
+	}
+	if err := p.SetBypassPreset("none"); err != nil {
+		t.Fatal(err)
+	}
+	if p.EffectiveMode() != SplitModeExclude {
+		t.Fatalf("should keep exclude when manual bypass remains, got %s", p.EffectiveMode())
+	}
+	if p.SplitTunnel.BypassPreset != "" {
+		t.Fatalf("preset: %q", p.SplitTunnel.BypassPreset)
+	}
+}
+
 func TestSetSplitModeIncludeClearsPreset(t *testing.T) {
 	p := &Profile{
 		Name:       "r",

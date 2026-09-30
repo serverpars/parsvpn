@@ -38,8 +38,8 @@ func (m model) openPresets() (tea.Model, tea.Cmd) {
 
 func (m *model) refreshPresetsList() {
 	items := []list.Item{
-		presetListItem{id: "ir", title: "ir", desc: "builtin — Iran IPv4 bypass CIDRs"},
-		presetListItem{id: "none", title: "none", desc: "builtin — clear / no bypass preset"},
+		presetListItem{id: "ir", title: "ir", desc: "builtin — Iran IPv4 bypass (apply via Edit → Split)"},
+		presetListItem{id: "none", title: "none", desc: "builtin — empty list (apply via Edit → Split)"},
 	}
 	names, err := preset.List()
 	if err != nil {

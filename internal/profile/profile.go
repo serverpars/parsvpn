@@ -519,6 +519,9 @@ func (p *Profile) SetSplitMode(mode string) error {
 }
 
 // SetBypassPreset sets ir|none|custom|"". Non-empty presets switch mode to exclude.
+// Clearing to none/"" removes the preset; if exclude mode would then have no bypass
+// CIDRs left, mode falls back to include so we do not accidentally full-tunnel
+// (which commonly breaks SSH / server access).
 func (p *Profile) SetBypassPreset(name string) error {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "none" {
@@ -529,8 +532,13 @@ func (p *Profile) SetBypassPreset(name string) error {
 			return fmt.Errorf("unknown bypass preset %q (builtins: ir, none — create custom with: parsvpn preset new %s)", name, name)
 		}
 		p.SplitTunnel.Mode = SplitModeExclude
+		p.SplitTunnel.BypassPreset = name
+		return nil
 	}
-	p.SplitTunnel.BypassPreset = name
+	p.SplitTunnel.BypassPreset = ""
+	if p.EffectiveMode() == SplitModeExclude && len(p.SplitTunnel.IPRanges) == 0 {
+		p.SplitTunnel.Mode = SplitModeInclude
+	}
 	return nil
 }
 

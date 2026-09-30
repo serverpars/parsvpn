@@ -224,31 +224,59 @@ func (m model) openEditSplit() (tea.Model, tea.Cmd) {
 }
 
 func (m *model) refreshSplitPresetList() {
-	cur := "none"
-	if p, err := profile.Load(m.editProfile); err == nil && p.SplitTunnel.BypassPreset != "" {
-		cur = p.SplitTunnel.BypassPreset
+	mode := profile.SplitModeInclude
+	curPreset := "none"
+	if p, err := profile.Load(m.editProfile); err == nil {
+		mode = p.EffectiveMode()
+		if p.SplitTunnel.BypassPreset != "" {
+			curPreset = p.SplitTunnel.BypassPreset
+		}
 	}
-	mark := func(id string) string {
-		if id == cur {
+	markMode := func(id string) string {
+		if id == mode {
+			return "* "
+		}
+		return "  "
+	}
+	markPreset := func(id string) string {
+		if id == curPreset {
 			return "* "
 		}
 		return "  "
 	}
 	items := []list.Item{
-		presetListItem{id: "none", title: mark("none") + "none", desc: "Clear bypass preset"},
-		presetListItem{id: "ir", title: mark("ir") + "ir", desc: "Builtin Iran IPv4 bypass"},
+		presetListItem{
+			id:    "mode:include",
+			title: markMode(profile.SplitModeInclude) + "Mode: include",
+			desc:  "Only listed routes go via the tunnel (clears country preset)",
+		},
+		presetListItem{
+			id:    "mode:exclude",
+			title: markMode(profile.SplitModeExclude) + "Mode: exclude",
+			desc:  "Tunnel everything except bypass preset / routes",
+		},
+		presetListItem{
+			id:    "none",
+			title: markPreset("none") + "Preset: none",
+			desc:  "No country bypass — switches to include if no manual bypass routes",
+		},
+		presetListItem{
+			id:    "ir",
+			title: markPreset("ir") + "Preset: ir",
+			desc:  "Exclude mode + bypass Iranian IPv4 ranges",
+		},
 	}
 	if names, err := preset.List(); err == nil {
 		for _, n := range names {
-			desc := "Custom preset"
+			desc := "Custom bypass preset (sets exclude mode)"
 			if p, err := preset.Load(n); err == nil {
-				desc = fmt.Sprintf("Custom — %d entries", len(p.Entries))
+				desc = fmt.Sprintf("Custom — %d entries (sets exclude mode)", len(p.Entries))
 			}
-			items = append(items, presetListItem{id: n, title: mark(n) + n, desc: desc})
+			items = append(items, presetListItem{id: n, title: markPreset(n) + "Preset: " + n, desc: desc})
 		}
 	}
 	m.editList.SetItems(items)
-	m.editList.Title = fmt.Sprintf("Bypass preset — %s", m.editProfile)
+	m.editList.Title = fmt.Sprintf("Split — %s", m.editProfile)
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = true
 	m.editList.SetDelegate(delegate)
@@ -280,7 +308,14 @@ func (m model) updateEditSplit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !ok {
 			return m, nil
 		}
-		return m, editSetPreset(m.editProfile, it.id)
+		switch it.id {
+		case "mode:include":
+			return m, editSetMode(m.editProfile, profile.SplitModeInclude)
+		case "mode:exclude":
+			return m, editSetMode(m.editProfile, profile.SplitModeExclude)
+		default:
+			return m, editSetPreset(m.editProfile, it.id)
+		}
 	}
 	var cmd tea.Cmd
 	m.editList, cmd = m.editList.Update(msg)
@@ -451,22 +486,22 @@ func editSetMode(profileName, mode string) tea.Cmd {
 	}
 }
 
-func editSetPreset(profileName, preset string) tea.Cmd {
+func editSetPreset(profileName, presetName string) tea.Cmd {
 	return func() tea.Msg {
 		p, err := profile.Load(profileName)
 		if err != nil {
 			return editDoneMsg{err: err, reopen: "split"}
 		}
-		if err := p.SetBypassPreset(preset); err != nil {
+		if err := p.SetBypassPreset(presetName); err != nil {
 			return editDoneMsg{err: err, reopen: "split"}
 		}
 		applied, err := saveAndReload(p)
 		if err != nil {
 			return editDoneMsg{err: err, reopen: "split"}
 		}
-		msg := "preset=none"
+		msg := fmt.Sprintf("mode=%s preset=none", p.EffectiveMode())
 		if p.SplitTunnel.BypassPreset != "" {
-			msg = fmt.Sprintf("mode=exclude preset=%s", p.SplitTunnel.BypassPreset)
+			msg = fmt.Sprintf("mode=%s preset=%s", p.EffectiveMode(), p.SplitTunnel.BypassPreset)
 		}
 		return editDoneMsg{message: msg + applyNote(applied), reopen: "split"}
 	}
@@ -629,7 +664,8 @@ func (m model) viewEditSplit() string {
 		}
 	}
 	hint := fmt.Sprintf("Current: mode=%s  preset=%s\n", mode, presetName) +
-		"[i] Include (clears preset)  [x] Exclude  [enter] Apply highlighted preset  [m] Manage presets"
+		"Select Mode: include / Mode: exclude, or a bypass preset, then press enter.\n" +
+		"Shortcuts: [i] include  [x] exclude  [m] manage custom presets"
 	var errLine string
 	if m.err != "" {
 		errLine = "\nError: " + m.err + "\n"
@@ -637,7 +673,7 @@ func (m model) viewEditSplit() string {
 	if m.notice != "" {
 		errLine += "\n" + m.notice + "\n"
 	}
-	help := helpStyle.Render("[esc] Back")
+	help := helpStyle.Render("[enter] Apply  [i]/[x] Mode  [m] Presets  [esc] Back")
 	return header + "\n" + hint + "\n\n" + m.editList.View() + errLine + "\n" + help
 }
 
