@@ -1,0 +1,6 @@
+.git
+.idea
+.vscode
+*.md
+dist/*
+!dist/parsvpn-linux-amd64

@@ -1,0 +1,18 @@
+[Unit]
+Description=ParsVPN WireGuard daemon
+Documentation=https://github.com/serverpars/parsvpn
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/parsvpn daemon
+Restart=on-failure
+RestartSec=2
+# Root required for TUN, netlink policy routing, and DNS :53 bind.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

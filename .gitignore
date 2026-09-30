@@ -1,0 +1,8 @@
+*.exe
+*.test
+/dist/
+/vendor/
+.idea/
+.vscode/
+*.swp
+.DS_Store

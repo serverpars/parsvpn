@@ -1,0 +1,12 @@
+FROM almalinux:9
+
+RUN dnf -y install iproute iptables wireguard-tools iputils bash \
+ && dnf clean all
+
+COPY dist/parsvpn-linux-amd64 /usr/local/bin/parsvpn
+COPY testdata /testdata
+COPY tests/coexist /tests/coexist
+RUN chmod +x /usr/local/bin/parsvpn /tests/coexist/*.sh \
+ && mkdir -p /etc/parsvpn/profiles /var/run/parsvpn /etc/wireguard
+
+WORKDIR /

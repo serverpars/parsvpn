@@ -1,0 +1,15 @@
+# Legacy alias — use Dockerfile.ubuntu
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      iproute2 iptables wireguard-tools iputils-ping ca-certificates bash \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY dist/parsvpn-linux-amd64 /usr/local/bin/parsvpn
+COPY testdata /testdata
+COPY tests/coexist /tests/coexist
+RUN chmod +x /usr/local/bin/parsvpn /tests/coexist/*.sh \
+ && mkdir -p /etc/parsvpn/profiles /var/run/parsvpn /etc/wireguard
+
+WORKDIR /

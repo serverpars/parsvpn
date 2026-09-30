@@ -1,0 +1,142 @@
+package dnseng
+
+import (
+	"fmt"
+	"net"
+	"os"
+	"strings"
+	"sync"
+
+	"github.com/miekg/dns"
+	"github.com/serverpars/parsvpn/internal/constants"
+	"github.com/serverpars/parsvpn/internal/profile"
+)
+
+// Proxy is an embedded DNS resolver for host overrides on 127.0.0.199:53.
+type Proxy struct {
+	mu        sync.RWMutex
+	overrides map[string]net.IP
+	upstream  string
+	server    *dns.Server
+	adapter   ResolverAdapter
+}
+
+// ResolverAdapter integrates with the host resolver (resolved / resolv.conf).
+type ResolverAdapter interface {
+	Apply(domains []string) error
+	Restore() error
+}
+
+func NewProxy(overrides []profile.HostOverride, upstream string, adapter ResolverAdapter) *Proxy {
+	if upstream == "" {
+		upstream = "1.1.1.1:53"
+	}
+	m := make(map[string]net.IP, len(overrides))
+	for _, o := range overrides {
+		ip := net.ParseIP(o.IP)
+		if ip == nil {
+			continue
+		}
+		m[strings.ToLower(strings.TrimSuffix(o.Domain, "."))] = ip
+	}
+	return &Proxy{overrides: m, upstream: upstream, adapter: adapter}
+}
+
+// Start binds DNSListenAddr. Fails clearly if the address is taken.
+func (p *Proxy) Start() error {
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", p.handle)
+	p.server = &dns.Server{
+		Addr:    constants.DNSListenAddr,
+		Net:     "udp",
+		Handler: mux,
+	}
+	ln, err := net.ListenPacket("udp", constants.DNSListenAddr)
+	if err != nil {
+		return fmt.Errorf("DNS bind %s failed (is another local DNS proxy using it?): %w", constants.DNSListenAddr, err)
+	}
+	_ = ln.Close()
+
+	go func() {
+		_ = p.server.ListenAndServe()
+	}()
+
+	domains := make([]string, 0, len(p.overrides))
+	p.mu.RLock()
+	for d := range p.overrides {
+		domains = append(domains, d)
+	}
+	p.mu.RUnlock()
+	if p.adapter != nil && len(domains) > 0 {
+		if err := p.adapter.Apply(domains); err != nil {
+			_ = p.Stop()
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *Proxy) Stop() error {
+	if p.adapter != nil {
+		_ = p.adapter.Restore()
+	}
+	if p.server != nil {
+		return p.server.Shutdown()
+	}
+	return nil
+}
+
+func (p *Proxy) handle(w dns.ResponseWriter, r *dns.Msg) {
+	if len(r.Question) == 0 {
+		return
+	}
+	q := r.Question[0]
+	name := strings.ToLower(strings.TrimSuffix(q.Name, "."))
+
+	p.mu.RLock()
+	ip, ok := p.overrides[name]
+	p.mu.RUnlock()
+
+	m := new(dns.Msg)
+	m.SetReply(r)
+	if ok && (q.Qtype == dns.TypeA || q.Qtype == dns.TypeAAAA || q.Qtype == dns.TypeANY) {
+		if ip4 := ip.To4(); ip4 != nil && (q.Qtype == dns.TypeA || q.Qtype == dns.TypeANY) {
+			m.Answer = append(m.Answer, &dns.A{
+				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
+				A:   ip4,
+			})
+			_ = w.WriteMsg(m)
+			return
+		}
+		if ip4 := ip.To4(); ip4 == nil && (q.Qtype == dns.TypeAAAA || q.Qtype == dns.TypeANY) {
+			m.Answer = append(m.Answer, &dns.AAAA{
+				Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 30},
+				AAAA: ip,
+			})
+			_ = w.WriteMsg(m)
+			return
+		}
+	}
+
+	// Forward everything else upstream.
+	c := new(dns.Client)
+	in, _, err := c.Exchange(r, p.upstream)
+	if err != nil || in == nil {
+		m.Rcode = dns.RcodeServerFailure
+		_ = w.WriteMsg(m)
+		return
+	}
+	_ = w.WriteMsg(in)
+}
+
+// DetectAdapter picks systemd-resolved D-Bus when available, else resolv.conf.
+func DetectAdapter() ResolverAdapter {
+	if _, err := os.Stat("/run/systemd/resolve/stub-resolv.conf"); err == nil {
+		return &ResolvedAdapter{}
+	}
+	// Also detect via resolvectl presence indirectly: if /etc/resolv.conf is a symlink to stub.
+	if target, err := os.Readlink("/etc/resolv.conf"); err == nil && strings.Contains(target, "systemd") {
+		return &ResolvedAdapter{}
+	}
+	return &ResolvConfAdapter{}
+}

@@ -1,0 +1,370 @@
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/serverpars/parsvpn/internal/constants"
+	"github.com/serverpars/parsvpn/internal/dnseng"
+	"github.com/serverpars/parsvpn/internal/ipc"
+	"github.com/serverpars/parsvpn/internal/neteng"
+	"github.com/serverpars/parsvpn/internal/profile"
+	"github.com/serverpars/parsvpn/internal/wg"
+)
+
+// Daemon owns the tunnel session and serves the Unix socket API.
+type Daemon struct {
+	mu       sync.Mutex
+	net      *neteng.Engine
+	wg       *wg.Controller
+	dns      *dnseng.Proxy
+	active   *profile.Profile
+	lockFile *os.File
+	stopCh   chan struct{}
+	healCh   chan struct{}
+}
+
+func New() *Daemon {
+	return &Daemon{
+		net:    neteng.New(),
+		stopCh: make(chan struct{}),
+		healCh: make(chan struct{}, 1),
+	}
+}
+
+// Run starts the daemon (blocking).
+func (d *Daemon) Run() error {
+	if err := profile.EnsureDirs(); err != nil {
+		return err
+	}
+	lf, err := neteng.AcquireLock(constants.LockPath)
+	if err != nil {
+		return err
+	}
+	d.lockFile = lf
+	defer neteng.ReleaseLock(d.lockFile)
+
+	_ = d.net.CleanupOrphans()
+
+	ctrl, err := wg.New()
+	if err != nil {
+		return err
+	}
+	d.wg = ctrl
+	defer d.wg.Close()
+
+	ln, err := ipc.Listen()
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+	defer os.Remove(constants.SocketPath)
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		for sig := range sigCh {
+			log.Printf("signal %v — shutting down", sig)
+			_ = d.Down()
+			close(d.stopCh)
+			_ = ln.Close()
+			return
+		}
+	}()
+
+	go d.healthLoop()
+	go d.healLoop()
+
+	log.Printf("parsvpn daemon listening on %s", constants.SocketPath)
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-d.stopCh:
+				return nil
+			default:
+				return err
+			}
+		}
+		go d.handleConn(conn)
+	}
+}
+
+func (d *Daemon) handleConn(conn net.Conn) {
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
+	dec := json.NewDecoder(conn)
+	enc := json.NewEncoder(conn)
+	var req ipc.Request
+	if err := dec.Decode(&req); err != nil {
+		return
+	}
+	resp := d.dispatch(req)
+	_ = enc.Encode(resp)
+}
+
+func (d *Daemon) dispatch(req ipc.Request) ipc.Response {
+	switch req.Cmd {
+	case "up":
+		if req.Profile == "" {
+			return ipc.Response{OK: false, Error: "profile required"}
+		}
+		if err := d.Up(req.Profile); err != nil {
+			return ipc.Response{OK: false, Error: err.Error()}
+		}
+		st := d.Status()
+		return ipc.Response{OK: true, Status: &st}
+	case "down":
+		if err := d.Down(); err != nil {
+			return ipc.Response{OK: false, Error: err.Error()}
+		}
+		st := d.Status()
+		return ipc.Response{OK: true, Status: &st}
+	case "status":
+		st := d.Status()
+		return ipc.Response{OK: true, Status: &st}
+	case "ping":
+		return ipc.Response{OK: true}
+	default:
+		return ipc.Response{OK: false, Error: "unknown cmd"}
+	}
+}
+
+// Up brings the named profile online.
+func (d *Daemon) Up(name string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	p, err := profile.Load(name)
+	if err != nil {
+		return err
+	}
+	if d.active != nil {
+		if err := d.downLocked(); err != nil {
+			return err
+		}
+	}
+
+	_ = d.net.CleanupOrphans()
+
+	kernelOK, err := d.net.EnsureKernelWireGuard()
+	if err != nil {
+		return err
+	}
+	if !kernelOK {
+		if err := d.wg.StartUserspace(p.MTU); err != nil {
+			return fmt.Errorf("userspace wireguard: %w", err)
+		}
+	}
+	if err := d.wg.Configure(p); err != nil {
+		_ = d.net.Teardown()
+		return err
+	}
+	if err := d.net.AssignAddress(p.Address, p.MTU); err != nil {
+		_ = d.net.Teardown()
+		return err
+	}
+	cidrs := p.DestinationCIDRs()
+	if len(cidrs) == 0 {
+		log.Printf("warning: profile %q has no split CIDRs — tunnel up but no policy routes", p.Name)
+	} else if err := d.net.ApplySplitRoutes(cidrs); err != nil {
+		_ = d.net.Teardown()
+		return err
+	}
+
+	if len(p.SplitTunnel.HostOverrides) > 0 {
+		adapter := dnseng.DetectAdapter()
+		proxy := dnseng.NewProxy(p.SplitTunnel.HostOverrides, firstDNS(p), adapter)
+		if err := proxy.Start(); err != nil {
+			_ = d.net.Teardown()
+			return err
+		}
+		d.dns = proxy
+	}
+
+	d.active = p
+	_ = d.persistStateLocked()
+	if err := d.net.WatchLinkDeleted(d.stopCh, func() {
+		select {
+		case d.healCh <- struct{}{}:
+		default:
+		}
+	}); err != nil {
+		log.Printf("link watch unavailable: %v", err)
+	}
+	log.Printf("up profile=%s iface=%s userspace=%v routes=%d", p.Name, constants.IfaceName, d.wg.Userspace(), len(cidrs))
+	return nil
+}
+
+// Down tears down the active session.
+func (d *Daemon) Down() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.downLocked()
+}
+
+func (d *Daemon) downLocked() error {
+	if d.dns != nil {
+		_ = d.dns.Stop()
+		d.dns = nil
+	}
+	if d.wg != nil {
+		// Close userspace device before deleting link.
+		if d.wg.Userspace() {
+			d.wg.Close()
+			ctrl, err := wg.New()
+			if err == nil {
+				d.wg = ctrl
+			}
+		}
+	}
+	_ = d.net.Teardown()
+	d.active = nil
+	_ = os.Remove(constants.StatePath)
+	return nil
+}
+
+// Status returns current session info.
+func (d *Daemon) Status() ipc.StatusPayload {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.statusLocked()
+}
+
+func (d *Daemon) statusLocked() ipc.StatusPayload {
+	st := ipc.StatusPayload{
+		Active:    d.active != nil,
+		Interface: constants.IfaceName,
+		UpdatedAt: time.Now().UTC(),
+	}
+	if d.active == nil {
+		return st
+	}
+	st.Profile = d.active.Name
+	st.Address = d.active.Address
+	st.SplitIPs = d.active.DestinationCIDRs()
+	st.Userspace = d.wg != nil && d.wg.Userspace()
+	if len(d.active.Peers) > 0 {
+		st.Endpoint = d.active.Peers[0].Endpoint
+	}
+	for _, o := range d.active.SplitTunnel.HostOverrides {
+		st.Overrides = append(st.Overrides, o.Domain+" -> "+o.IP)
+	}
+	if d.wg != nil {
+		rx, tx, hs, err := d.wg.Stats()
+		if err == nil {
+			st.RxBytes = rx
+			st.TxBytes = tx
+			if !hs.IsZero() {
+				st.Handshake = time.Since(hs).Round(time.Second).String() + " ago"
+			} else {
+				st.Handshake = "never"
+			}
+		}
+	}
+	return st
+}
+
+func (d *Daemon) healthLoop() {
+	t := time.NewTicker(time.Duration(constants.HandshakePollIntervalSec) * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-d.stopCh:
+			return
+		case <-t.C:
+			d.mu.Lock()
+			p := d.active
+			ctrl := d.wg
+			d.mu.Unlock()
+			if p == nil || ctrl == nil {
+				continue
+			}
+			age, err := ctrl.PeerHandshakeAge()
+			if err != nil {
+				continue
+			}
+			if age > time.Duration(constants.HandshakeStaleSec)*time.Second {
+				log.Printf("handshake stale (%s) — probing / rekey", age.Round(time.Second))
+				if !probeTunnel(p) {
+					d.mu.Lock()
+					_ = ctrl.Rekey(p)
+					d.mu.Unlock()
+				}
+			}
+		}
+	}
+}
+
+func (d *Daemon) healLoop() {
+	for {
+		select {
+		case <-d.stopCh:
+			return
+		case <-d.healCh:
+			d.mu.Lock()
+			p := d.active
+			d.mu.Unlock()
+			if p == nil {
+				continue
+			}
+			log.Printf("interface %s deleted — auto-heal", constants.IfaceName)
+			name := p.Name
+			_ = d.Down()
+			if err := d.Up(name); err != nil {
+				log.Printf("auto-heal failed: %v", err)
+			}
+		}
+	}
+}
+
+func (d *Daemon) persistState() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.persistStateLocked()
+}
+
+func (d *Daemon) persistStateLocked() error {
+	st := d.statusLocked()
+	data, _ := json.MarshalIndent(st, "", "  ")
+	return os.WriteFile(constants.StatePath, data, 0o600)
+}
+
+func firstDNS(p *profile.Profile) string {
+	if len(p.DNS) > 0 {
+		host := p.DNS[0]
+		if _, _, err := net.SplitHostPort(host); err != nil {
+			return host + ":53"
+		}
+		return host
+	}
+	return "1.1.1.1:53"
+}
+
+func probeTunnel(p *profile.Profile) bool {
+	// Best-effort TCP connect to first host override IP or first split /32-ish peer gateway.
+	targets := []string{}
+	for _, o := range p.SplitTunnel.HostOverrides {
+		targets = append(targets, net.JoinHostPort(o.IP, "53"))
+		targets = append(targets, net.JoinHostPort(o.IP, "443"))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	d := net.Dialer{}
+	for _, addr := range targets {
+		conn, err := d.DialContext(ctx, "tcp", addr)
+		if err == nil {
+			_ = conn.Close()
+			return true
+		}
+	}
+	return false
+}
