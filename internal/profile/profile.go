@@ -397,12 +397,13 @@ func (p *Profile) RemoveRoutes(cidrs ...string) error {
 }
 
 // AddHostOverride adds or replaces a domain→IP override.
+// Domain may be an exact name (example.com) or a wildcard (*.example.com).
 func (p *Profile) AddHostOverride(domain, ip string) error {
-	domain = strings.TrimSpace(strings.ToLower(domain))
-	ip = strings.TrimSpace(ip)
-	if domain == "" {
-		return fmt.Errorf("domain required")
+	domain, err := NormalizeHostDomain(domain)
+	if err != nil {
+		return err
 	}
+	ip = strings.TrimSpace(ip)
 	if net.ParseIP(ip) == nil {
 		return fmt.Errorf("invalid IP %q", ip)
 	}
@@ -418,7 +419,10 @@ func (p *Profile) AddHostOverride(domain, ip string) error {
 
 // RemoveHostOverride removes a domain override.
 func (p *Profile) RemoveHostOverride(domain string) error {
-	domain = strings.TrimSpace(strings.ToLower(domain))
+	domain, err := NormalizeHostDomain(domain)
+	if err != nil {
+		return err
+	}
 	out := p.SplitTunnel.HostOverrides[:0]
 	found := false
 	for _, o := range p.SplitTunnel.HostOverrides {
@@ -433,6 +437,61 @@ func (p *Profile) RemoveHostOverride(domain string) error {
 	}
 	p.SplitTunnel.HostOverrides = out
 	return nil
+}
+
+// NormalizeHostDomain lowercases and validates an exact or *.parent domain.
+func NormalizeHostDomain(domain string) (string, error) {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	domain = strings.TrimSuffix(domain, ".")
+	if domain == "" {
+		return "", fmt.Errorf("domain required")
+	}
+	if strings.HasPrefix(domain, "*.") {
+		rest := domain[2:]
+		if rest == "" || strings.Contains(rest, "*") || strings.HasPrefix(rest, ".") {
+			return "", fmt.Errorf("invalid wildcard domain %q (use *.example.com)", domain)
+		}
+		if net.ParseIP(rest) != nil {
+			return "", fmt.Errorf("wildcard cannot wrap an IP")
+		}
+		return "*." + rest, nil
+	}
+	if strings.Contains(domain, "*") {
+		return "", fmt.Errorf("invalid domain %q (use *.example.com for wildcards)", domain)
+	}
+	if net.ParseIP(domain) != nil {
+		return "", fmt.Errorf("domain required (got IP %q)", domain)
+	}
+	return domain, nil
+}
+
+// HostLookupName returns the name to resolve when pinning (apex for wildcards).
+func HostLookupName(domain string) string {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	domain = strings.TrimSuffix(domain, ".")
+	if strings.HasPrefix(domain, "*.") {
+		return domain[2:]
+	}
+	return domain
+}
+
+// WWWCompanion returns www.<domain> when it makes sense (not for wildcards / www.*).
+func WWWCompanion(domain string) (string, bool) {
+	domain = strings.TrimSpace(strings.ToLower(strings.TrimSuffix(domain, ".")))
+	if domain == "" || strings.HasPrefix(domain, "*.") || strings.HasPrefix(domain, "www.") {
+		return "", false
+	}
+	return "www." + domain, true
+}
+
+// RoutingDomainForOverride returns the systemd-resolved routing domain for an override.
+// Wildcards use ~parent so all subdomain queries reach the embedded proxy.
+func RoutingDomainForOverride(domain string) string {
+	domain = strings.TrimSpace(strings.ToLower(strings.TrimSuffix(domain, ".")))
+	if strings.HasPrefix(domain, "*.") {
+		return "~" + domain[2:]
+	}
+	return domain
 }
 
 // SetSplitMode sets include|exclude.
@@ -522,8 +581,24 @@ func (p *Profile) NeedsDNSProxy() bool {
 
 // PinHost sets a host override and adds the IP as a /32 (or /128) tunnel route.
 func (p *Profile) PinHost(domain, ipStr string) error {
+	return p.PinHostWith(domain, ipStr, false)
+}
+
+// PinHostWith pins domain→IP (and optionally www.<domain>) and adds one tunnel route.
+func (p *Profile) PinHostWith(domain, ipStr string, alsoWWW bool) error {
+	domain, err := NormalizeHostDomain(domain)
+	if err != nil {
+		return err
+	}
 	if err := p.AddHostOverride(domain, ipStr); err != nil {
 		return err
+	}
+	if alsoWWW {
+		if www, ok := WWWCompanion(domain); ok {
+			if err := p.AddHostOverride(www, ipStr); err != nil {
+				return err
+			}
+		}
 	}
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
@@ -538,7 +613,10 @@ func (p *Profile) PinHost(domain, ipStr string) error {
 
 // UnpinHost removes a host override and its matching /32|/128 route when present.
 func (p *Profile) UnpinHost(domain string) error {
-	domain = strings.TrimSpace(strings.ToLower(domain))
+	domain, err := NormalizeHostDomain(domain)
+	if err != nil {
+		return err
+	}
 	var ipStr string
 	for _, o := range p.SplitTunnel.HostOverrides {
 		if strings.EqualFold(o.Domain, domain) {

@@ -71,6 +71,8 @@ sudo parsvpn route rm office 203.0.113.0/24
 # DNS host overrides (embedded resolver pins)
 parsvpn host list office
 sudo parsvpn host add office example.com          # resolve via tunnel DNS, pin + route
+sudo parsvpn host add office example.com --www    # also pin www.example.com
+sudo parsvpn host add office '*.github.com'       # all subdomains → same IP (resolves github.com)
 sudo parsvpn host add office db.internal 10.10.0.50  # optional explicit IP
 sudo parsvpn host rm office example.com
 

@@ -48,7 +48,11 @@ func NewProxy(overrides []profile.HostOverride, upstream string, adapter Resolve
 		if ip == nil {
 			continue
 		}
-		m[strings.ToLower(strings.TrimSuffix(o.Domain, "."))] = ip
+		domain, err := profile.NormalizeHostDomain(o.Domain)
+		if err != nil {
+			continue
+		}
+		m[domain] = ip
 	}
 	return &Proxy{overrides: m, upstream: upstream, adapter: adapter, catchAll: catchAll}
 }
@@ -72,12 +76,7 @@ func (p *Proxy) Start() error {
 		_ = p.server.ListenAndServe()
 	}()
 
-	domains := make([]string, 0, len(p.overrides))
-	p.mu.RLock()
-	for d := range p.overrides {
-		domains = append(domains, d)
-	}
-	p.mu.RUnlock()
+	domains := routingDomains(p.overrides)
 	if p.adapter != nil && (p.catchAll || len(domains) > 0) {
 		if err := p.adapter.Apply(ApplyOpts{Domains: domains, CatchAll: p.catchAll}); err != nil {
 			_ = p.Stop()
@@ -85,6 +84,23 @@ func (p *Proxy) Start() error {
 		}
 	}
 	return nil
+}
+
+func routingDomains(overrides map[string]net.IP) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(overrides))
+	for d := range overrides {
+		rd := profile.RoutingDomainForOverride(d)
+		if rd == "" {
+			continue
+		}
+		if _, ok := seen[rd]; ok {
+			continue
+		}
+		seen[rd] = struct{}{}
+		out = append(out, rd)
+	}
+	return out
 }
 
 func (p *Proxy) Stop() error {
@@ -105,7 +121,7 @@ func (p *Proxy) handle(w dns.ResponseWriter, r *dns.Msg) {
 	name := strings.ToLower(strings.TrimSuffix(q.Name, "."))
 
 	p.mu.RLock()
-	ip, ok := p.overrides[name]
+	ip, ok := matchOverride(p.overrides, name)
 	p.mu.RUnlock()
 
 	m := new(dns.Msg)
@@ -138,6 +154,26 @@ func (p *Proxy) handle(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 	_ = w.WriteMsg(in)
+}
+
+// matchOverride finds an exact domain pin, then the longest matching *.parent wildcard.
+func matchOverride(overrides map[string]net.IP, name string) (net.IP, bool) {
+	if ip, ok := overrides[name]; ok {
+		return ip, true
+	}
+	labels := strings.Split(name, ".")
+	var best string
+	for i := 1; i < len(labels); i++ {
+		wild := "*." + strings.Join(labels[i:], ".")
+		if _, ok := overrides[wild]; ok {
+			best = wild // later iterations are shorter; keep going for longest match first
+			break       // labels[i:] shrinks as i grows — first hit is longest
+		}
+	}
+	if best == "" {
+		return nil, false
+	}
+	return overrides[best], true
 }
 
 // DetectAdapter picks systemd-resolved when available, else resolv.conf.

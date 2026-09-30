@@ -9,18 +9,27 @@ import (
 	"github.com/serverpars/parsvpn/internal/profile"
 )
 
+// AddOptions controls companion pins when adding a host override.
+type AddOptions struct {
+	AlsoWWW bool
+}
+
 // Add resolves domain through the active tunnel's DNS path, then pins
 // domain→IP as a host override and adds the IP to split routes.
-func Add(profileName, domain string) (ip string, err error) {
+// Domain may be exact (example.com) or wildcard (*.example.com); wildcards
+// resolve the parent apex for the pinned IP.
+func Add(profileName, domain string, opts AddOptions) (ip string, err error) {
+	domain, err = profile.NormalizeHostDomain(domain)
+	if err != nil {
+		return "", err
+	}
 	p, err := profile.Load(profileName)
 	if err != nil {
 		return "", err
 	}
-	st, err := requireActive(profileName)
-	if err != nil {
+	if _, err := requireActive(profileName); err != nil {
 		return "", err
 	}
-	_ = st
 
 	dnsHost := p.UpstreamDNSHost()
 	added, err := p.EnsureResolverRouted(dnsHost)
@@ -31,20 +40,20 @@ func Add(profileName, domain string) (ip string, err error) {
 		if err := saveReload(p); err != nil {
 			return "", fmt.Errorf("route DNS via tunnel: %w", err)
 		}
-		// Re-load after reload in case Normalize changed fields.
 		p, err = profile.Load(profileName)
 		if err != nil {
 			return "", err
 		}
 	}
 
-	resolved, err := dnseng.LookupA(domain, dnsHost, 8*time.Second)
+	lookup := profile.HostLookupName(domain)
+	resolved, err := dnseng.LookupA(lookup, dnsHost, 8*time.Second)
 	if err != nil {
 		return "", fmt.Errorf("%w (is the tunnel up and carrying DNS to %s?)", err, dnsHost)
 	}
 	ip = resolved.String()
 
-	if err := p.PinHost(domain, ip); err != nil {
+	if err := p.PinHostWith(domain, ip, opts.AlsoWWW); err != nil {
 		return "", err
 	}
 	if err := saveReload(p); err != nil {

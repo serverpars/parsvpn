@@ -155,8 +155,9 @@ func (m model) updateEditHosts(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "a":
 		m.mode = modeEditHostAdd
+		m.hostAlsoWWW = false
 		m.nameInput.SetValue("")
-		m.nameInput.Placeholder = "example.com"
+		m.nameInput.Placeholder = "example.com or *.example.com"
 		cmd := m.nameInput.Focus()
 		m.err = ""
 		return m, cmd
@@ -182,10 +183,15 @@ func (m model) updateEditHostAdd(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.nameInput.Blur()
 		m.mode = modeEditHosts
+		m.hostAlsoWWW = false
 		m.err = ""
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
+	case "ctrl+w":
+		m.hostAlsoWWW = !m.hostAlsoWWW
+		m.err = ""
+		return m, nil
 	case "enter":
 		domain := strings.TrimSpace(m.nameInput.Value())
 		m.nameInput.Blur()
@@ -197,7 +203,13 @@ func (m model) updateEditHostAdd(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.err = "enter domain only (IP is resolved via tunnel DNS)"
 			return m, nil
 		}
-		return m, editAddHost(m.editProfile, domain)
+		if _, err := profile.NormalizeHostDomain(domain); err != nil {
+			m.err = err.Error()
+			return m, nil
+		}
+		alsoWWW := m.hostAlsoWWW
+		m.hostAlsoWWW = false
+		return m, editAddHost(m.editProfile, domain, alsoWWW)
 	}
 	var cmd tea.Cmd
 	m.nameInput, cmd = m.nameInput.Update(msg)
@@ -338,14 +350,20 @@ func editRemoveRoute(profileName, cidr string) tea.Cmd {
 	}
 }
 
-func editAddHost(profileName, domain string) tea.Cmd {
+func editAddHost(profileName, domain string, alsoWWW bool) tea.Cmd {
 	return func() tea.Msg {
-		ip, err := hostpin.Add(profileName, domain)
+		ip, err := hostpin.Add(profileName, domain, hostpin.AddOptions{AlsoWWW: alsoWWW})
 		if err != nil {
 			return editDoneMsg{err: err, reopen: "hosts"}
 		}
+		extra := ""
+		if alsoWWW {
+			if _, ok := profile.WWWCompanion(domain); ok {
+				extra = " +www"
+			}
+		}
 		return editDoneMsg{
-			message: fmt.Sprintf("pinned %s -> %s (+ route, via tunnel DNS)", domain, ip),
+			message: fmt.Sprintf("pinned %s%s -> %s (+ route, via tunnel DNS)", domain, extra, ip),
 			reopen:  "hosts",
 		}
 	}
@@ -533,13 +551,20 @@ func (m model) viewEditHosts() string {
 
 func (m model) viewEditHostAdd() string {
 	header := titleStyle.Render(fmt.Sprintf("Add host — %s", m.editProfile))
-	body := "Resolves via tunnel DNS, then pins domain→IP and adds a /32 route.\nProfile must be connected.\n\n" +
-		promptStyle.Render("domain:") + "\n" + m.nameInput.View()
+	wwwState := "off"
+	if m.hostAlsoWWW {
+		wwwState = "on"
+	}
+	body := "Resolves via tunnel DNS, then pins domain→IP and adds a /32 route.\n" +
+		"Use *.example.com for all subdomains (not the apex).\n" +
+		"Profile must be connected.\n\n" +
+		promptStyle.Render("domain:") + "\n" + m.nameInput.View() + "\n\n" +
+		fmt.Sprintf("also www: %s", wwwState)
 	var errLine string
 	if m.err != "" {
 		errLine = "\nError: " + m.err + "\n"
 	}
-	help := helpStyle.Render("[enter] Resolve & pin  [esc] Back")
+	help := helpStyle.Render("[enter] Resolve & pin  [ctrl+w] Toggle www  [esc] Back")
 	return header + "\n\n" + body + errLine + "\n\n" + help
 }
 

@@ -202,6 +202,62 @@ func TestPinHost(t *testing.T) {
 	}
 }
 
+func TestPinHostWithWWWAndWildcard(t *testing.T) {
+	p := &Profile{
+		Name:       "r",
+		PrivateKey: "k",
+		Address:    "10.0.0.2/32",
+		Peers:      []Peer{{PublicKey: "p", AllowedIPs: []string{"10.0.0.0/8"}}},
+	}
+	if err := p.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.PinHostWith("Example.COM", "10.1.1.1", true); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, o := range p.SplitTunnel.HostOverrides {
+		got[o.Domain] = o.IP
+	}
+	if got["example.com"] != "10.1.1.1" || got["www.example.com"] != "10.1.1.1" {
+		t.Fatalf("www pin missing: %#v", got)
+	}
+	if err := p.PinHostWith("*.github.com", "10.2.2.2", true); err != nil {
+		t.Fatal(err)
+	}
+	foundWild := false
+	for _, o := range p.SplitTunnel.HostOverrides {
+		if o.Domain == "*.github.com" && o.IP == "10.2.2.2" {
+			foundWild = true
+		}
+		if o.Domain == "www.*.github.com" {
+			t.Fatal("should not create www for wildcard")
+		}
+	}
+	if !foundWild {
+		t.Fatalf("wildcard missing: %#v", p.SplitTunnel.HostOverrides)
+	}
+	if RoutingDomainForOverride("*.github.com") != "~github.com" {
+		t.Fatalf("routing domain: %s", RoutingDomainForOverride("*.github.com"))
+	}
+	if HostLookupName("*.github.com") != "github.com" {
+		t.Fatal("lookup name")
+	}
+}
+
+func TestNormalizeHostDomain(t *testing.T) {
+	ok, err := NormalizeHostDomain("*.GitHub.com.")
+	if err != nil || ok != "*.github.com" {
+		t.Fatalf("got %q err=%v", ok, err)
+	}
+	if _, err := NormalizeHostDomain("*"); err == nil {
+		t.Fatal("expected error")
+	}
+	if _, err := NormalizeHostDomain("foo.*.com"); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 func TestAddRemoveRoutesAndHosts(t *testing.T) {
 	p := &Profile{
 		Name:       "r",

@@ -90,6 +90,7 @@ type model struct {
 	needsReexec   bool
 	editProfile   string
 	editList      list.Model
+	hostAlsoWWW   bool
 }
 
 type tickMsg struct{}

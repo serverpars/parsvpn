@@ -46,9 +46,18 @@ func (a *ResolvConfAdapter) Apply(opts ApplyOpts) error {
 		b.WriteByte('\n')
 	}
 	if len(opts.Domains) > 0 {
-		b.WriteString("search ")
-		b.WriteString(strings.Join(opts.Domains, " "))
-		b.WriteByte('\n')
+		search := make([]string, 0, len(opts.Domains))
+		for _, d := range opts.Domains {
+			if strings.HasPrefix(d, "~") {
+				continue // routing-only (systemd); not valid in resolv.conf search
+			}
+			search = append(search, d)
+		}
+		if len(search) > 0 {
+			b.WriteString("search ")
+			b.WriteString(strings.Join(search, " "))
+			b.WriteByte('\n')
+		}
 	}
 	return os.WriteFile(resolv, []byte(b.String()), 0o644)
 }

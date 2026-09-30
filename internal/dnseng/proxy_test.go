@@ -52,3 +52,35 @@ func TestProxyOverride(t *testing.T) {
 		t.Fatalf("unexpected answer: %#v", in.Answer[0])
 	}
 }
+
+func TestMatchOverrideWildcard(t *testing.T) {
+	overrides := map[string]net.IP{
+		"example.com":       net.ParseIP("10.0.0.1"),
+		"*.github.com":      net.ParseIP("10.0.0.2"),
+		"*.api.github.com":  net.ParseIP("10.0.0.3"),
+	}
+	cases := []struct {
+		name string
+		want string
+		ok   bool
+	}{
+		{"example.com", "10.0.0.1", true},
+		{"www.example.com", "", false},
+		{"github.com", "", false},
+		{"www.github.com", "10.0.0.2", true},
+		{"a.b.github.com", "10.0.0.2", true},
+		{"v3.api.github.com", "10.0.0.3", true},
+	}
+	for _, tc := range cases {
+		ip, ok := matchOverride(overrides, tc.name)
+		if ok != tc.ok {
+			t.Fatalf("%s: ok=%v want %v", tc.name, ok, tc.ok)
+		}
+		if !tc.ok {
+			continue
+		}
+		if ip.String() != tc.want {
+			t.Fatalf("%s: got %s want %s", tc.name, ip, tc.want)
+		}
+	}
+}

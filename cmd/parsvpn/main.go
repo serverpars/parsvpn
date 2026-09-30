@@ -341,37 +341,48 @@ func cmdHost() *cobra.Command {
 			return nil
 		},
 	}
+	var alsoWWW bool
 	add := &cobra.Command{
 		Use:   "add <profile> <domain> [ip]",
 		Short: "Pin a host: resolve domain via tunnel DNS (or use given IP), override + route",
 		Long: `Add a DNS host override and a /32 route for the resolved IP.
 
 With only <domain>, the profile must be connected. DNS is queried through the
-tunnel (exclude mode, or by temporarily routing the resolver in include mode).`,
+tunnel (exclude mode, or by temporarily routing the resolver in include mode).
+
+Domain may be exact (example.com) or a wildcard (*.example.com). Wildcards
+match any subdomain (www.example.com, api.example.com, …) but not the apex;
+the apex is resolved to choose the pinned IP.
+
+  --www   also pin www.<domain> to the same IP (ignored for wildcards)`,
 		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			domain := args[1]
 			if len(args) == 3 {
 				p, err := profile.Load(args[0])
 				if err != nil {
 					return err
 				}
-				if err := p.PinHost(args[1], args[2]); err != nil {
+				if err := p.PinHostWith(domain, args[2], alsoWWW); err != nil {
 					return err
 				}
 				if err := saveProfileAndReload(p); err != nil {
 					return err
 				}
-				fmt.Printf("host override %s -> %s on %s (+ route)\n", args[1], args[2], p.Name)
+				fmt.Printf("host override %s -> %s on %s (+ route%s)\n",
+					domain, args[2], p.Name, wwwNote(domain, alsoWWW))
 				return nil
 			}
-			ip, err := hostpin.Add(args[0], args[1])
+			ip, err := hostpin.Add(args[0], domain, hostpin.AddOptions{AlsoWWW: alsoWWW})
 			if err != nil {
 				return err
 			}
-			fmt.Printf("host override %s -> %s on %s (+ route, via tunnel DNS)\n", args[1], ip, args[0])
+			fmt.Printf("host override %s -> %s on %s (+ route, via tunnel DNS%s)\n",
+				domain, ip, args[0], wwwNote(domain, alsoWWW))
 			return nil
 		},
 	}
+	add.Flags().BoolVar(&alsoWWW, "www", false, "also pin www.<domain> to the same IP")
 	rm := &cobra.Command{
 		Use:   "rm <profile> <domain>",
 		Short: "Remove a host override and its pinned /32 route",
@@ -386,6 +397,16 @@ tunnel (exclude mode, or by temporarily routing the resolver in include mode).`,
 	}
 	root.AddCommand(listCmd, add, rm)
 	return root
+}
+
+func wwwNote(domain string, alsoWWW bool) string {
+	if !alsoWWW {
+		return ""
+	}
+	if _, ok := profile.WWWCompanion(domain); !ok {
+		return ""
+	}
+	return ", +www"
 }
 
 func cmdDNS() *cobra.Command {
