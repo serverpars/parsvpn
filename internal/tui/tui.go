@@ -24,6 +24,7 @@ import (
 var (
 	titleStyle  = lipgloss.NewStyle().Bold(true)
 	statusOn    = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
+	statusHeal  = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
 	statusOff   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	helpStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	detailStyle = lipgloss.NewStyle().PaddingLeft(2)
@@ -779,13 +780,30 @@ func clearTraffic() tea.Msg {
 
 func (m model) viewBrowse() string {
 	statusLine := statusOff.Render("[STATUS: INACTIVE]")
-	if m.status.Active {
+	if m.status.Healing {
+		prof := m.status.Profile
+		if prof == "" {
+			prof = m.status.AutostartProfile
+		}
+		if prof == "" {
+			prof = "?"
+		}
+		statusLine = statusHeal.Render(fmt.Sprintf("[STATUS: HEALING -> %s]", prof))
+	} else if m.status.Active {
 		statusLine = statusOn.Render(fmt.Sprintf("[STATUS: ACTIVE -> %s]", m.status.Interface))
 	}
 	header := titleStyle.Render(fmt.Sprintf("parsvpn %s", constants.Version)) + "   " + statusLine
 
 	var detail strings.Builder
-	if m.status.Active {
+	if m.status.Healing {
+		prof := m.status.Profile
+		if prof == "" {
+			prof = m.status.AutostartProfile
+		}
+		detail.WriteString(fmt.Sprintf("Auto-healing tunnel for profile %q.\n", prof))
+		detail.WriteString("Interface was lost; reconnecting — wait a moment.\n")
+		detail.WriteString("----------------------------------------------\n")
+	} else if m.status.Active {
 		detail.WriteString(fmt.Sprintf("Endpoint:  %s\n", m.status.Endpoint))
 		detail.WriteString(fmt.Sprintf("Local IP:  %s\n", m.status.Address))
 		detail.WriteString(fmt.Sprintf("Handshake: %s\n", m.status.Handshake))

@@ -45,6 +45,7 @@ type StatusPayload struct {
 	DNSServers       []string  `json:"dns_servers,omitempty"`
 	AutoConnect      bool      `json:"auto_connect,omitempty"`
 	AutostartProfile string    `json:"autostart_profile,omitempty"`
+	Healing          bool      `json:"healing,omitempty"`
 	Userspace        bool      `json:"userspace,omitempty"`
 	Error            string    `json:"error,omitempty"`
 	UpdatedAt        time.Time `json:"updated_at,omitempty"`

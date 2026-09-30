@@ -124,6 +124,11 @@ func cmdStatus() *cobra.Command {
 				return enc.Encode(resp.Status)
 			}
 			st := resp.Status
+			if st.Healing {
+				fmt.Printf("status: healing\nprofile: %s\ninterface: %s\nautostart: %s\nreconnects as: %s\n",
+					orDash(st.Profile), st.Interface, boolOnOff(st.AutoConnect), orDash(st.AutostartProfile))
+				return nil
+			}
 			if !st.Active {
 				fmt.Printf("status: inactive\nautostart: %s\nreconnects as: %s\n",
 					boolOnOff(st.AutoConnect), orDash(st.AutostartProfile))

@@ -36,13 +36,15 @@ func (s *Sampler) loop(stop <-chan struct{}) {
 		}
 		err := s.captureOnce(stop)
 		if err == nil {
+			// stop closed inside captureOnce
 			return
 		}
+		// Interface gone or bind failed — retry (do not treat as fatal).
 		select {
 		case <-stop:
 			return
 		case <-time.After(backoff):
-			if backoff < 8*time.Second {
+			if backoff < 5*time.Second {
 				backoff *= 2
 			}
 		}

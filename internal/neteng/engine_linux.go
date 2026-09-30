@@ -320,9 +320,17 @@ func (e *Engine) WatchLinkDeleted(stop <-chan struct{}, onDeleted func()) error 
 				if !ok {
 					return
 				}
-				if upd.Header.Type == unix.RTM_DELLINK && upd.Link.Attrs().Name == e.Iface {
-					onDeleted()
+				if upd.Link == nil || upd.Link.Attrs() == nil {
+					continue
 				}
+				if upd.Link.Attrs().Name != e.Iface {
+					continue
+				}
+				// Only act on true deletions — address/MTU updates also emit NEWLINK.
+				if upd.Header.Type != unix.RTM_DELLINK {
+					continue
+				}
+				onDeleted()
 			}
 		}
 	}()
