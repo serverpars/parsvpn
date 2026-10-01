@@ -70,6 +70,21 @@ if ip rule show | grep -q 'lookup 51920\|table 51920\| 51920 '; then
   ip rule show >&2
   exit 1
 fi
+if ip rule show | grep -Eqi 'fwmark 0x5192|fwmark 20914'; then
+  echo "FAIL: residual return-path fwmark rule" >&2
+  ip rule show >&2
+  exit 1
+fi
+if command -v nft >/dev/null 2>&1 && nft list tables 2>/dev/null | grep -qw parsvpn; then
+  echo "FAIL: residual nft table inet parsvpn" >&2
+  nft list tables >&2
+  exit 1
+fi
+if iptables -t mangle -L PARSVPN_PRE >/dev/null 2>&1 || iptables -t mangle -L PARSVPN_OUT >/dev/null 2>&1; then
+  echo "FAIL: residual iptables PARSVPN_* chains" >&2
+  iptables -t mangle -L -n >&2
+  exit 1
+fi
 if ip link show pv-tun0 >/dev/null 2>&1; then
   echo "FAIL: pv-tun0 still present after down" >&2
   exit 1

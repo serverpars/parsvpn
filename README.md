@@ -5,9 +5,10 @@ Standalone, Linux-only WireGuard VPN client for ServerPars. Single static binary
 ## Design goals
 
 - Coexist with `wg-quick`, OpenVPN, Tailscale, WARP, StrongSwan
-- Isolated interface `pv-tun0`, routing table `51920`, rule priorities `14000–16999`
+- Isolated interface `pv-tun0`, routing table `51920`, rule priorities `13990` + `14000–16999`
 - Split-tunnel by destination CIDR (never steals the default route by default)
 - Optional exclude mode: tunnel all traffic except bypass CIDRs (e.g. Iran)
+- Exclude-mode return-path: conntrack/fwmark keeps replies to inbound connections on the main table (SSH, CDN, reverse proxy)
 - Optional system DNS override via embedded resolver on `127.0.0.199:53`
 - Optional host overrides via the same embedded DNS
 - Static ELF (`CGO_ENABLED=0`) for CentOS 7 / AlmaLinux 8–9 / Ubuntu 20.04+
@@ -160,7 +161,7 @@ Profiles live in `/etc/parsvpn/profiles/<name>.json` (`0600`). Importing a `.con
 ```
 
 - `mode: "include"` (default): `ip_ranges` go through the tunnel.
-- `mode: "exclude"`: everything goes through the tunnel except `ip_ranges` plus `bypass_preset` (e.g. `"ir"` for Iran IPv4). WireGuard AllowedIPs are forced to include `0.0.0.0/0`; the peer endpoint is always bypassed.
+- `mode: "exclude"`: everything goes through the tunnel except `ip_ranges` plus `bypass_preset` (e.g. `"ir"` for Iran IPv4). WireGuard AllowedIPs are forced to include `0.0.0.0/0`; the peer endpoint is always bypassed. Inbound connections that arrive on a non-tunnel interface are conntrack-marked (`fwmark 0x5192`) so their replies stay on the main table (fixes SSH/CDN/reverse-proxy breakage under full-tunnel).
 - `override_system_dns: true`: while connected, all system DNS is routed through the embedded proxy to `dns` (or `1.1.1.1`). Importing a WireGuard conf with `DNS=` enables this automatically.
 
 ## Isolation map
@@ -169,7 +170,9 @@ Profiles live in `/etc/parsvpn/profiles/<name>.json` (`0600`). Importing a `.con
 |-----------|--------|
 | Interface | `pv-tun0` |
 | Table | `51920` |
-| Rule prefs | `14000–16999` |
+| FwMark | `0x5192` (exclude-mode return-path) |
+| Rule prefs | `13990` (return-path), `14000–16999` (split/bypass/catch-all) |
+| nftables | `inet parsvpn` (exclude-mode CONNMARK; iptables fallback) |
 | Config | `/etc/parsvpn/` (`profiles/`, `config.json`) |
 | Socket | `/var/run/parsvpn/daemon.sock` |
 | Lock | `/var/run/parsvpn/daemon.lock` |

@@ -128,6 +128,10 @@ func (e *Engine) ApplySplitRoutes(cidrs []string) error {
 
 // ApplyExcludeRoutes tunnels everything via table 51920 except bypass CIDRs
 // (and the WireGuard endpoint), which stay on the main table.
+//
+// It also installs conntrack/fwmark return-path policy so replies to inbound
+// connections that arrived on a non-tunnel interface (SSH, CDN origin, reverse
+// proxy) leave via the main table instead of the tunnel.
 func (e *Engine) ApplyExcludeRoutes(bypass []string, endpointHost string) error {
 	if err := e.flushRules(); err != nil {
 		return err
@@ -209,6 +213,11 @@ func (e *Engine) ApplyExcludeRoutes(bypass []string, endpointHost string) error 
 	if err := netlink.RuleAdd(catch); err != nil {
 		return fmt.Errorf("catch-all tunnel rule: %w", err)
 	}
+
+	// Return-path: mark inbound !pv-tun0 connections and route their replies via main.
+	if err := e.applyReturnPath(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -244,16 +253,23 @@ func (e *Engine) flushTable() error {
 }
 
 func (e *Engine) flushRules() error {
+	e.flushReturnPath()
 	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
 		rules, err := netlink.RuleList(family)
 		if err != nil {
 			continue
 		}
 		for _, r := range rules {
+			if r.Priority == constants.RulePrefReturnPath {
+				_ = netlink.RuleDel(&r)
+			}
 			if r.Priority >= constants.RulePrefMin && r.Priority <= constants.RulePrefCatchAll {
 				_ = netlink.RuleDel(&r)
 			}
 			if r.Table == e.Table {
+				_ = netlink.RuleDel(&r)
+			}
+			if r.Mark == constants.FwMark {
 				_ = netlink.RuleDel(&r)
 			}
 		}
