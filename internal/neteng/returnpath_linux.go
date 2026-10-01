@@ -4,15 +4,33 @@ package neteng
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/serverpars/parsvpn/internal/constants"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
+
+const (
+	iptablesPreChain = "PARSVPN_PRE"
+	iptablesOutChain = "PARSVPN_OUT"
+
+	returnPathBackendNFT      = "nft"
+	returnPathBackendIPTables = "iptables"
+	cmdTimeout                = 3 * time.Second
+)
+
+func returnPathBackendPath() string {
+	return filepath.Join(constants.RuntimeDir, "returnpath.backend")
+}
 
 // applyReturnPath installs conntrack/fwmark policy so replies to inbound
 // connections that arrived on a non-tunnel interface stay on the main table.
@@ -41,20 +59,36 @@ func (e *Engine) applyReturnPathRules() error {
 }
 
 func (e *Engine) applyReturnPathMarks() error {
-	if err := e.applyReturnPathNFT(); err == nil {
+	// Prefer nft exclusively when available. Mixing nft + iptables-nft on the
+	// same host deadlocks on the xtables lock (iptables -X hangs forever).
+	if _, err := exec.LookPath("nft"); err == nil {
+		if err := e.applyReturnPathNFT(); err != nil {
+			return err
+		}
+		writeReturnPathBackend(returnPathBackendNFT)
 		return nil
-	} else if !isNFTMissing(err) {
-		return err
 	}
 	if err := e.applyReturnPathIPTables(); err != nil {
 		return fmt.Errorf("return-path marks: nft unavailable and iptables failed: %w", err)
 	}
+	writeReturnPathBackend(returnPathBackendIPTables)
 	return nil
 }
 
 func (e *Engine) flushReturnPath() {
-	e.flushReturnPathNFT()
-	e.flushReturnPathIPTables()
+	backend := readReturnPathBackend()
+	switch backend {
+	case returnPathBackendIPTables:
+		e.flushReturnPathIPTables()
+	default:
+		e.flushReturnPathNFT()
+		// Older builds always ran iptables flush and may have left chains behind.
+		// Probe/clean with a hard timeout so we never block the daemon.
+		if iptablesReturnPathPresent() {
+			e.flushReturnPathIPTables()
+		}
+	}
+	_ = os.Remove(returnPathBackendPath())
 	e.flushReturnPathRules()
 }
 
@@ -88,9 +122,15 @@ func returnPathNFTScript(iface string, mark uint32) string {
 
 func (e *Engine) applyReturnPathNFT() error {
 	e.flushReturnPathNFT()
-	cmd := exec.Command("nft", "-f", "-")
+	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "nft", "-f", "-")
 	cmd.Stdin = strings.NewReader(returnPathNFTScript(e.Iface, constants.FwMark))
+	setKillProcessGroup(cmd)
 	out, err := cmd.CombinedOutput()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("nft: timed out after %s", cmdTimeout)
+	}
 	if err != nil {
 		return fmt.Errorf("nft: %w (%s)", err, bytes.TrimSpace(out))
 	}
@@ -98,25 +138,18 @@ func (e *Engine) applyReturnPathNFT() error {
 }
 
 func (e *Engine) flushReturnPathNFT() {
-	_ = exec.Command("nft", "delete", "table", "inet", constants.NFTTable).Run()
+	_ = runTimed(cmdTimeout, "nft", "delete", "table", "inet", constants.NFTTable)
 }
 
-func isNFTMissing(err error) bool {
-	if err == nil {
+func iptablesReturnPathPresent() bool {
+	if _, err := exec.LookPath("iptables"); err != nil {
 		return false
 	}
-	if errors.Is(err, exec.ErrNotFound) {
+	if runTimed(time.Second, "iptables", "-t", "mangle", "-n", "-L", iptablesPreChain) == nil {
 		return true
 	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "executable file not found") ||
-		strings.Contains(msg, "not found in $path")
+	return runTimed(time.Second, "iptables", "-t", "mangle", "-n", "-L", iptablesOutChain) == nil
 }
-
-const (
-	iptablesPreChain  = "PARSVPN_PRE"
-	iptablesOutChain  = "PARSVPN_OUT"
-)
 
 func (e *Engine) applyReturnPathIPTables() error {
 	e.flushReturnPathIPTables()
@@ -133,7 +166,7 @@ func (e *Engine) applyReturnPathIPTables() error {
 		{"iptables", "-t", "mangle", "-A", "OUTPUT", "-j", iptablesOutChain},
 	}
 	for _, args := range steps {
-		if err := runQuiet(args...); err != nil {
+		if err := runTimed(cmdTimeout, args...); err != nil {
 			e.flushReturnPathIPTables()
 			return fmt.Errorf("%s: %w", strings.Join(args, " "), err)
 		}
@@ -142,20 +175,44 @@ func (e *Engine) applyReturnPathIPTables() error {
 }
 
 func (e *Engine) flushReturnPathIPTables() {
-	// Detach then delete chains; ignore errors when absent.
-	_ = runQuiet("iptables", "-t", "mangle", "-D", "PREROUTING", "-j", iptablesPreChain)
-	_ = runQuiet("iptables", "-t", "mangle", "-F", iptablesPreChain)
-	_ = runQuiet("iptables", "-t", "mangle", "-X", iptablesPreChain)
-	_ = runQuiet("iptables", "-t", "mangle", "-D", "OUTPUT", "-j", iptablesOutChain)
-	_ = runQuiet("iptables", "-t", "mangle", "-F", iptablesOutChain)
-	_ = runQuiet("iptables", "-t", "mangle", "-X", iptablesOutChain)
+	// Detach then delete chains; ignore errors when absent. Each call is timed
+	// so a stuck xtables lock cannot freeze the daemon.
+	_ = runTimed(cmdTimeout, "iptables", "-t", "mangle", "-D", "PREROUTING", "-j", iptablesPreChain)
+	_ = runTimed(cmdTimeout, "iptables", "-t", "mangle", "-F", iptablesPreChain)
+	_ = runTimed(cmdTimeout, "iptables", "-t", "mangle", "-X", iptablesPreChain)
+	_ = runTimed(cmdTimeout, "iptables", "-t", "mangle", "-D", "OUTPUT", "-j", iptablesOutChain)
+	_ = runTimed(cmdTimeout, "iptables", "-t", "mangle", "-F", iptablesOutChain)
+	_ = runTimed(cmdTimeout, "iptables", "-t", "mangle", "-X", iptablesOutChain)
 }
 
-func runQuiet(args ...string) error {
-	cmd := exec.Command(args[0], args[1:]...)
+func runTimed(timeout time.Duration, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	setKillProcessGroup(cmd)
 	out, err := cmd.CombinedOutput()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("%s: timed out after %s", strings.Join(args, " "), timeout)
+	}
 	if err != nil {
 		return fmt.Errorf("%w (%s)", err, bytes.TrimSpace(out))
 	}
 	return nil
+}
+
+func setKillProcessGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+}
+
+func writeReturnPathBackend(backend string) {
+	_ = os.MkdirAll(constants.RuntimeDir, 0o700)
+	_ = os.WriteFile(returnPathBackendPath(), []byte(backend+"\n"), 0o600)
+}
+
+func readReturnPathBackend() string {
+	data, err := os.ReadFile(returnPathBackendPath())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
