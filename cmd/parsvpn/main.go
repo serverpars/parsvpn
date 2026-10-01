@@ -948,10 +948,9 @@ then installs newer releases unattended. Toggle: parsvpn autoupdate on|off
 			if err := update.Apply(ctx, rel); err != nil {
 				return err
 			}
-			fmt.Printf("updated to %s (service restarted) — relaunching\n", update.FormatVersion(rel.Version))
-			if err := update.ReexecSelf(); err != nil {
-				fmt.Printf("relaunch failed: %v (run parsvpn again)\n", err)
-			}
+			// Do not re-exec this process: argv still contains "update" (and possibly
+			// --force), which would download+install again forever.
+			fmt.Printf("updated to %s (service restarted)\n", update.FormatVersion(rel.Version))
 			return nil
 		},
 	}
