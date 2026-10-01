@@ -2,8 +2,10 @@ package update
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"testing"
+	"time"
 )
 
 func TestCompare(t *testing.T) {
@@ -78,5 +80,35 @@ func TestLoadConfigOmitsKeepDefaults(t *testing.T) {
 	}
 	if !cfg.AutoConnect {
 		t.Fatal("auto_connect should stay default true when omitted")
+	}
+}
+
+func TestWaitForUnixSocket(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/daemon.sock"
+
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+
+	if err := waitForUnixSocket(path, 2*time.Second, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	missing := dir + "/missing.sock"
+	err = waitForUnixSocket(missing, 200*time.Millisecond, "test")
+	if err == nil {
+		t.Fatal("expected timeout error")
 	}
 }

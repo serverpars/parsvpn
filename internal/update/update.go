@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -253,5 +254,30 @@ func restartService() error {
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
+	if err := waitForUnixSocket(constants.SocketPath, 15*time.Second, constants.ServiceName); err != nil {
+		return err
+	}
 	return nil
+}
+
+// waitForUnixSocket polls until path accepts connections (or timeout).
+// systemctl restart returns before the new process has created the socket.
+func waitForUnixSocket(path string, timeout time.Duration, serviceHint string) error {
+	deadline := time.Now().Add(timeout)
+	var last error
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("unix", path, 500*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		last = err
+		time.Sleep(100 * time.Millisecond)
+	}
+	hint := serviceHint
+	if hint == "" {
+		hint = "parsvpn"
+	}
+	return fmt.Errorf("service restarted but daemon socket %s not ready: %v (check: systemctl status %s && journalctl -u %s -n 50)",
+		path, last, hint, hint)
 }
