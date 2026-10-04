@@ -15,35 +15,9 @@ func (nopAdapter) Restore() error        { return nil }
 
 func TestProxyOverride(t *testing.T) {
 	p := NewProxy([]profile.HostOverride{{Domain: "db.internal", IP: "10.10.0.50"}}, "1.1.1.1:53", nopAdapter{}, false)
-	// Directly exercise handle via a local UDP server on an ephemeral port.
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", p.handle)
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := pc.LocalAddr().String()
-	_ = pc.Close()
+	addr := startProxyHandler(t, p.handle)
 
-	srv := &dns.Server{Addr: addr, Net: "udp", Handler: mux}
-	go func() { _ = srv.ListenAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
-
-	// Give server a moment
-	c := new(dns.Client)
-	m := new(dns.Msg)
-	m.SetQuestion("db.internal.", dns.TypeA)
-	// Retry a few times in case Listen hasn't bound yet
-	var in *dns.Msg
-	for i := 0; i < 20; i++ {
-		in, _, err = c.Exchange(m, addr)
-		if err == nil {
-			break
-		}
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
+	in := exchange(t, addr, "db.internal.", dns.TypeA)
 	if len(in.Answer) == 0 {
 		t.Fatalf("no answer: %+v", in)
 	}
@@ -51,6 +25,89 @@ func TestProxyOverride(t *testing.T) {
 	if !ok || a.A.String() != "10.10.0.50" {
 		t.Fatalf("unexpected answer: %#v", in.Answer[0])
 	}
+}
+
+func TestProxyOverrideIPv4BlocksAAAALeak(t *testing.T) {
+	// Upstream would return a real AAAA; the pin must not forward AAAA.
+	upstream := startUpstreamAAAA(t, "ident.me.", net.ParseIP("2a01:4f9:c012:8091::1"))
+	p := NewProxy([]profile.HostOverride{{Domain: "ident.me", IP: "65.108.151.63"}}, upstream, nopAdapter{}, true)
+	addr := startProxyHandler(t, p.handle)
+
+	aaaa := exchange(t, addr, "ident.me.", dns.TypeAAAA)
+	if aaaa.Rcode != dns.RcodeSuccess {
+		t.Fatalf("AAAA rcode=%v", aaaa.Rcode)
+	}
+	if len(aaaa.Answer) != 0 {
+		t.Fatalf("AAAA should be NODATA, got %#v", aaaa.Answer)
+	}
+
+	a := exchange(t, addr, "ident.me.", dns.TypeA)
+	if len(a.Answer) != 1 {
+		t.Fatalf("A answers: %#v", a.Answer)
+	}
+	ans, ok := a.Answer[0].(*dns.A)
+	if !ok || ans.A.String() != "65.108.151.63" {
+		t.Fatalf("A answer: %#v", a.Answer[0])
+	}
+}
+
+func startProxyHandler(t *testing.T, h dns.HandlerFunc) string {
+	t.Helper()
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", h)
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := pc.LocalAddr().String()
+	_ = pc.Close()
+	srv := &dns.Server{Addr: addr, Net: "udp", Handler: mux}
+	go func() { _ = srv.ListenAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	return addr
+}
+
+func startUpstreamAAAA(t *testing.T, qname string, ip net.IP) string {
+	t.Helper()
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		if len(r.Question) > 0 && r.Question[0].Qtype == dns.TypeAAAA {
+			m.Answer = append(m.Answer, &dns.AAAA{
+				Hdr:  dns.RR_Header{Name: qname, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 30},
+				AAAA: ip,
+			})
+		}
+		_ = w.WriteMsg(m)
+	})
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := pc.LocalAddr().String()
+	_ = pc.Close()
+	srv := &dns.Server{Addr: addr, Net: "udp", Handler: mux}
+	go func() { _ = srv.ListenAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	return addr
+}
+
+func exchange(t *testing.T, addr, name string, qtype uint16) *dns.Msg {
+	t.Helper()
+	c := new(dns.Client)
+	m := new(dns.Msg)
+	m.SetQuestion(name, qtype)
+	var in *dns.Msg
+	var err error
+	for i := 0; i < 20; i++ {
+		in, _, err = c.Exchange(m, addr)
+		if err == nil {
+			return in
+		}
+	}
+	t.Fatalf("exchange %s: %v", name, err)
+	return nil
 }
 
 func TestMatchOverrideWildcard(t *testing.T) {

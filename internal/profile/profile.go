@@ -231,6 +231,27 @@ func (p *Profile) Normalize() error {
 			}
 		}
 	}
+	// Include mode: every host override IP must have a matching tunnel /32|/128.
+	// Without this, DNS pins the name but traffic still leaves via eth0.
+	if mode == SplitModeInclude {
+		if err := p.SyncHostOverrideRoutes(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SyncHostOverrideRoutes ensures each host-override IP is present in
+// split_tunnel.ip_ranges (include mode only). Safe to call repeatedly.
+func (p *Profile) SyncHostOverrideRoutes() error {
+	if p.EffectiveMode() != SplitModeInclude {
+		return nil
+	}
+	for _, o := range p.SplitTunnel.HostOverrides {
+		if err := p.AddRoutes(o.IP); err != nil {
+			return fmt.Errorf("host override %s route: %w", o.Domain, err)
+		}
+	}
 	return nil
 }
 

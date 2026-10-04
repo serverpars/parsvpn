@@ -128,19 +128,28 @@ func (p *Proxy) handle(w dns.ResponseWriter, r *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetReply(r)
 	if ok && (q.Qtype == dns.TypeA || q.Qtype == dns.TypeAAAA || q.Qtype == dns.TypeANY) {
-		if ip4 := ip.To4(); ip4 != nil && (q.Qtype == dns.TypeA || q.Qtype == dns.TypeANY) {
-			m.Answer = append(m.Answer, &dns.A{
-				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
-				A:   ip4,
-			})
-			flowlog.Default.RememberIP(ip4.String(), name)
+		if ip4 := ip.To4(); ip4 != nil {
+			if q.Qtype == dns.TypeA || q.Qtype == dns.TypeANY {
+				m.Answer = append(m.Answer, &dns.A{
+					Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
+					A:   ip4,
+				})
+				flowlog.Default.RememberIP(ip4.String(), name)
+				flowlog.Default.Add(flowlog.Event{
+					Kind: "dns", Proto: "udp", Domain: name, Dst: ip4.String(), Detail: "override A",
+				})
+				_ = w.WriteMsg(m)
+				return
+			}
+			// IPv4 pin + AAAA: NODATA (do not leak real AAAA via upstream).
 			flowlog.Default.Add(flowlog.Event{
-				Kind: "dns", Proto: "udp", Domain: name, Dst: ip4.String(), Detail: "override A",
+				Kind: "dns", Proto: "udp", Domain: name, Detail: "override AAAA nodata",
 			})
 			_ = w.WriteMsg(m)
 			return
 		}
-		if ip4 := ip.To4(); ip4 == nil && (q.Qtype == dns.TypeAAAA || q.Qtype == dns.TypeANY) {
+		// IPv6 pin
+		if q.Qtype == dns.TypeAAAA || q.Qtype == dns.TypeANY {
 			m.Answer = append(m.Answer, &dns.AAAA{
 				Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 30},
 				AAAA: ip,
@@ -152,6 +161,12 @@ func (p *Proxy) handle(w dns.ResponseWriter, r *dns.Msg) {
 			_ = w.WriteMsg(m)
 			return
 		}
+		// IPv6 pin + A: NODATA
+		flowlog.Default.Add(flowlog.Event{
+			Kind: "dns", Proto: "udp", Domain: name, Detail: "override A nodata",
+		})
+		_ = w.WriteMsg(m)
+		return
 	}
 
 	// Forward everything else upstream (via tunnel when override/routes are set).

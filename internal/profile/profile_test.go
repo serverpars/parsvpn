@@ -169,6 +169,33 @@ func TestExcludeBypassPreset(t *testing.T) {
 	}
 }
 
+func TestSyncHostOverrideRoutesOnNormalize(t *testing.T) {
+	p := &Profile{
+		Name:       "r",
+		PrivateKey: "k",
+		Address:    "10.0.0.2/32",
+		Peers:      []Peer{{PublicKey: "p", AllowedIPs: []string{"10.0.0.0/8"}}},
+		SplitTunnel: SplitTunnel{
+			Mode: SplitModeInclude,
+			// Override without its /32 (broken/older profile state).
+			HostOverrides: []HostOverride{{Domain: "ident.me", IP: "65.108.151.63"}},
+			IPRanges:      []string{"10.0.0.0/8"},
+		},
+	}
+	if err := p.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range p.SplitTunnel.IPRanges {
+		if c == "65.108.151.63/32" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected host override /32 after normalize: %#v", p.SplitTunnel.IPRanges)
+	}
+}
+
 func TestPinHost(t *testing.T) {
 	p := &Profile{
 		Name:       "r",
