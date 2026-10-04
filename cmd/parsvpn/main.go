@@ -16,6 +16,7 @@ import (
 	"github.com/serverpars/parsvpn/internal/preset"
 	"github.com/serverpars/parsvpn/internal/profile"
 	"github.com/serverpars/parsvpn/internal/tui"
+	"github.com/serverpars/parsvpn/internal/uninstall"
 	"github.com/serverpars/parsvpn/internal/update"
 	"github.com/spf13/cobra"
 )
@@ -52,6 +53,7 @@ func main() {
 		cmdAutoupdate(),
 		cmdTraffic(),
 		cmdUpdate(),
+		cmdUninstall(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -879,6 +881,26 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+func cmdUninstall() *cobra.Command {
+	var purge bool
+	var yes bool
+	c := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Stop ParsVPN and remove the service and binary",
+		Long: `Stop the systemd unit, tear down pv-tun0 / policy routes, and remove the
+installed binary and unit file.
+
+Config under /etc/parsvpn is kept unless --purge is passed.
+Requires root. Use --yes to skip the confirmation prompt.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return uninstall.Run(uninstall.Options{Purge: purge, Yes: yes})
+		},
+	}
+	c.Flags().BoolVar(&purge, "purge", false, "also delete /etc/parsvpn (profiles, presets, config)")
+	c.Flags().BoolVarP(&yes, "yes", "y", false, "do not prompt for confirmation")
+	return c
 }
 
 func cmdUpdate() *cobra.Command {

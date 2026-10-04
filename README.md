@@ -5,6 +5,7 @@ Standalone, Linux-only WireGuard VPN client for ServerPars. Single static binary
 ## Design goals
 
 - Coexist with `wg-quick`, OpenVPN, Tailscale, WARP, StrongSwan
+- Auto listen-port fallback when `51820` (or the profile port) is already taken (e.g. by `wg0`)
 - Isolated interface `pv-tun0`, routing table `51920`, rule priorities `13990` + `14000–16999`
 - Split-tunnel by destination CIDR (never steals the default route by default)
 - Optional exclude mode: tunnel all traffic except bypass CIDRs (e.g. Iran)
@@ -59,6 +60,10 @@ sudo parsvpn
 parsvpn update --check
 sudo parsvpn update
 sudo parsvpn update --disable-auto   # opt out of autopilot
+
+# Uninstall (keeps /etc/parsvpn unless --purge)
+sudo parsvpn uninstall
+sudo parsvpn uninstall --purge --yes
 ```
 
 ### Settings (TUI)

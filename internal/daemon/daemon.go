@@ -206,45 +206,67 @@ func (d *Daemon) Up(name string) error {
 	_ = d.net.CleanupOrphans()
 	d.ignoreLinkDelete.Store(false)
 
+	// Session copy so listen-port conflict fallback never mutates on-disk profile JSON.
+	session := *p
+	if port, conflict := neteng.ResolveListenPort(session.ListenPort); conflict {
+		log.Printf("listen_port %d already in use — using ephemeral port (coexistence with other WireGuard)", session.ListenPort)
+		session.ListenPort = port
+	}
+
 	kernelOK, err := d.net.EnsureKernelWireGuard()
 	if err != nil {
 		return err
 	}
 	if !kernelOK {
-		if err := d.wg.StartUserspace(p.MTU); err != nil {
+		if err := d.wg.StartUserspace(session.MTU); err != nil {
 			return fmt.Errorf("userspace wireguard: %w", err)
 		}
 	}
-	if err := d.wg.Configure(p); err != nil {
+	if err := d.configureAddressLocked(&session); err != nil {
 		_ = d.net.Teardown()
 		return err
 	}
-	if err := d.net.AssignAddress(p.Address, p.MTU); err != nil {
-		_ = d.net.Teardown()
-		return err
-	}
-	if err := d.applyRoutesLocked(p); err != nil {
+	if err := d.applyRoutesLocked(&session); err != nil {
 		_ = d.net.Teardown()
 		return err
 	}
 
-	if err := d.startDNSLocked(p); err != nil {
+	if err := d.startDNSLocked(&session); err != nil {
 		_ = d.net.Teardown()
 		return err
 	}
 
-	d.active = p
-	_ = writeWanted(p.Name)
+	d.active = &session
+	_ = writeWanted(session.Name)
 	_ = d.persistStateLocked()
-	routeN := len(p.DestinationCIDRs())
-	if p.EffectiveMode() == profile.SplitModeExclude {
-		if bypass, err := p.BypassCIDRs(); err == nil {
+	routeN := len(session.DestinationCIDRs())
+	if session.EffectiveMode() == profile.SplitModeExclude {
+		if bypass, err := session.BypassCIDRs(); err == nil {
 			routeN = len(bypass)
 		}
 	}
-	log.Printf("up profile=%s mode=%s iface=%s userspace=%v routes=%d dns_override=%v",
-		p.Name, p.EffectiveMode(), constants.IfaceName, d.wg.Userspace(), routeN, p.OverrideSystemDNS)
+	log.Printf("up profile=%s mode=%s iface=%s userspace=%v listen_port=%d routes=%d dns_override=%v",
+		session.Name, session.EffectiveMode(), constants.IfaceName, d.wg.Userspace(), session.ListenPort, routeN, session.OverrideSystemDNS)
 	return nil
+}
+
+// configureAddressLocked applies WireGuard config and brings the link up.
+// If link-up fails with EADDRINUSE on a fixed listen port (race after preflight),
+// retries once with an ephemeral listen port.
+func (d *Daemon) configureAddressLocked(p *profile.Profile) error {
+	if err := d.wg.Configure(p); err != nil {
+		return err
+	}
+	err := d.net.AssignAddress(p.Address, p.MTU)
+	if err == nil || p.ListenPort <= 0 || !neteng.IsAddrInUse(err) {
+		return err
+	}
+	log.Printf("listen_port %d failed at link-up (%v) — retrying with ephemeral port", p.ListenPort, err)
+	p.ListenPort = 0
+	if err := d.wg.Configure(p); err != nil {
+		return err
+	}
+	return d.net.AssignAddress(p.Address, p.MTU)
 }
 
 func (d *Daemon) applyRoutesLocked(p *profile.Profile) error {
