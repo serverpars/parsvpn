@@ -43,10 +43,16 @@ func (m model) updateEditMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "r":
+		m.err = ""
+		m.notice = ""
 		return m.openEditRoutes()
 	case "h":
+		m.err = ""
+		m.notice = ""
 		return m.openEditHosts()
 	case "s":
+		m.err = ""
+		m.notice = ""
 		return m.openEditSplit()
 	case "d":
 		m.mode = modeEditDNS
@@ -69,10 +75,18 @@ func (m model) openEditRoutes() (tea.Model, tea.Cmd) {
 	for _, c := range p.SplitTunnel.IPRanges {
 		items = append(items, editItem{label: c})
 	}
+	delegate := list.NewDefaultDelegate()
+	delegate.ShowDescription = false
+	m.editList.SetDelegate(delegate)
+	m.editList.SetShowHelp(false)
+	m.editList.SetShowStatusBar(false)
+	m.editList.SetFilteringEnabled(false)
 	m.editList.SetItems(items)
+	if len(items) > 0 {
+		m.editList.Select(0)
+	}
 	m.editList.Title = fmt.Sprintf("Routes — %s (%s)", p.Name, p.EffectiveMode())
 	m.mode = modeEditRoutes
-	m.err = ""
 	return m, nil
 }
 
@@ -86,10 +100,19 @@ func (m model) openEditHosts() (tea.Model, tea.Cmd) {
 	for _, o := range p.SplitTunnel.HostOverrides {
 		items = append(items, editItem{label: o.Domain + " " + o.IP})
 	}
+	delegate := list.NewDefaultDelegate()
+	delegate.ShowDescription = false
+	m.editList.SetDelegate(delegate)
+	m.editList.SetShowHelp(false)
+	m.editList.SetShowStatusBar(false)
+	m.editList.SetFilteringEnabled(false)
 	m.editList.SetItems(items)
+	if len(items) > 0 {
+		m.editList.Select(0)
+	}
 	m.editList.Title = fmt.Sprintf("Hosts — %s", p.Name)
 	m.mode = modeEditHosts
-	m.err = ""
+	// Keep m.err / m.notice from the caller (e.g. failed host add).
 	return m, nil
 }
 

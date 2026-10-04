@@ -2,6 +2,7 @@ package hostpin
 
 import (
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/serverpars/parsvpn/internal/dnseng"
@@ -47,7 +48,7 @@ func Add(profileName, domain string, opts AddOptions) (ip string, err error) {
 	}
 
 	lookup := profile.HostLookupName(domain)
-	resolved, err := dnseng.LookupA(lookup, dnsHost, 8*time.Second)
+	resolved, err := lookupAWithRetry(lookup, dnsHost, added)
 	if err != nil {
 		return "", fmt.Errorf("%w (is the tunnel up and carrying DNS to %s?)", err, dnsHost)
 	}
@@ -59,7 +60,36 @@ func Add(profileName, domain string, opts AddOptions) (ip string, err error) {
 	if err := saveReload(p); err != nil {
 		return "", err
 	}
+	// Re-load so callers see the persisted pin (and any Normalize sync).
+	if verify, err := profile.Load(profileName); err == nil {
+		p = verify
+	}
+	for _, o := range p.SplitTunnel.HostOverrides {
+		if o.Domain == domain {
+			return o.IP, nil
+		}
+	}
 	return ip, nil
+}
+
+func lookupAWithRetry(name, dnsHost string, justRouted bool) (net.IP, error) {
+	attempts := 1
+	if justRouted {
+		// Policy route was just installed — give the datapath a moment.
+		attempts = 4
+	}
+	var last error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			time.Sleep(time.Duration(i) * 300 * time.Millisecond)
+		}
+		ip, err := dnseng.LookupA(name, dnsHost, 5*time.Second)
+		if err == nil {
+			return ip, nil
+		}
+		last = err
+	}
+	return nil, last
 }
 
 // Remove drops a host override and its pinned /32 route.

@@ -276,11 +276,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, scheduleTick()
 	case statusMsg:
 		if msg.err != nil {
-			m.err = msg.err.Error()
+			// Only surface status-fetch failures on the browse screen so a
+			// background refresh cannot wipe an edit/host-add error.
+			if m.mode == modeBrowse {
+				m.err = msg.err.Error()
+			}
 		} else {
-			m.err = ""
 			m.status = msg.st
 			m.syncActiveFlags()
+			if m.mode == modeBrowse && isDaemonStatusError(m.err) {
+				m.err = ""
+			}
 			if m.mode == modeSettings {
 				m.refreshSettingsList()
 			}
@@ -341,6 +347,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			m.mode = modeEditMenu
 		}
+		// Refresh status in the background, but never as the only signal that
+		// could clear the edit error (statusMsg must not wipe m.err here).
 		return m, tea.Batch(cmd, refreshStatus)
 	case presetDoneMsg:
 		if msg.err != nil {
@@ -1098,4 +1106,13 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func isDaemonStatusError(err string) bool {
+	if err == "" {
+		return false
+	}
+	return strings.Contains(err, "daemon not running") ||
+		strings.Contains(err, "daemon unreachable") ||
+		strings.Contains(err, "connection refused")
 }
