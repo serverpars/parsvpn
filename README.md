@@ -15,9 +15,10 @@ Standalone, Linux-only WireGuard VPN client for ServerPars. Single static binary
 - Static ELF (`CGO_ENABLED=0`) for CentOS 7 / AlmaLinux 8–9 / Ubuntu 20.04+
 
 ## Infographic
-<p align="center">
-  <img src="info.png" alt="ParsVPN infographic" width="800">
-</p>
+  <details>
+  <summary><b>📊 Infographic: how ParsVPN works</b></summary>
+  <img src="info.png" alt="ParsVPN infographic">
+  </details>
 
 ## Install
 
