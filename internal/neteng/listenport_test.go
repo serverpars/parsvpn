@@ -34,7 +34,7 @@ func TestUDPListenPortAvailable_freeAndBusy(t *testing.T) {
 }
 
 func TestResolveListenPort(t *testing.T) {
-	port, conflict := ResolveListenPort(0)
+	port, conflict := ResolveListenPort(0, 0)
 	if port != 0 || conflict {
 		t.Fatalf("want 0,false got %d,%v", port, conflict)
 	}
@@ -46,9 +46,15 @@ func TestResolveListenPort(t *testing.T) {
 	defer ln.Close()
 	busy := ln.LocalAddr().(*net.UDPAddr).Port
 
-	got, conflict := ResolveListenPort(busy)
+	got, conflict := ResolveListenPort(busy, 0)
 	if got != 0 || !conflict {
 		t.Fatalf("busy port: want 0,true got %d,%v", got, conflict)
+	}
+
+	// Port held by us must not look like an external conflict.
+	got, conflict = ResolveListenPort(busy, busy)
+	if got != busy || conflict {
+		t.Fatalf("heldByUs: want %d,false got %d,%v", busy, got, conflict)
 	}
 }
 

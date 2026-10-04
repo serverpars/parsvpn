@@ -30,10 +30,15 @@ func UDPListenPortAvailable(port int) bool {
 }
 
 // ResolveListenPort returns the profile listen port to use for this session.
-// On conflict it returns 0 so WireGuard picks an ephemeral port (client-safe).
-func ResolveListenPort(want int) (port int, conflict bool) {
+// heldByUs is pv-tun0's current listen port (0 if unknown/down); when it equals
+// want, the port is treated as available so we do not false-conflict with ourselves.
+// On a real conflict it returns 0 so WireGuard keeps/picks an ephemeral port.
+func ResolveListenPort(want, heldByUs int) (port int, conflict bool) {
 	if want <= 0 {
 		return 0, false
+	}
+	if heldByUs > 0 && want == heldByUs {
+		return want, false
 	}
 	if UDPListenPortAvailable(want) {
 		return want, false

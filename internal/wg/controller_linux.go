@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/serverpars/parsvpn/internal/constants"
+	"github.com/serverpars/parsvpn/internal/neteng"
 	"github.com/serverpars/parsvpn/internal/profile"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
@@ -60,6 +61,18 @@ func (c *Controller) Close() {
 }
 
 func (c *Controller) Userspace() bool { return c.userspace }
+
+// ListenPort returns pv-tun0's current UDP listen port, or 0 if unknown.
+func (c *Controller) ListenPort() int {
+	if c == nil || c.client == nil {
+		return 0
+	}
+	dev, err := c.client.Device(constants.IfaceName)
+	if err != nil || dev == nil {
+		return 0
+	}
+	return dev.ListenPort
+}
 
 // StartUserspace creates the TUN and runs wireguard-go with a UAPI socket
 // so wgctrl can manage / inspect the device (CentOS 7 path).
@@ -113,23 +126,58 @@ func (c *Controller) StartUserspace(mtu int) error {
 }
 
 // Configure applies the profile. For kernel mode the interface must already exist.
+// Listen-port collisions (e.g. wg0 on 51820) are resolved here so every caller
+// (Up, Reload, Rekey) is protected — conflicting ports are omitted so the
+// current ephemeral bind is kept / the kernel picks one.
 func (c *Controller) Configure(p *profile.Profile) error {
+	if p == nil {
+		return fmt.Errorf("nil profile")
+	}
+	eff := *p
+	if port, conflict := neteng.ResolveListenPort(eff.ListenPort, c.ListenPort()); conflict {
+		eff.ListenPort = 0
+	} else {
+		eff.ListenPort = port
+	}
+
 	if c.userspace {
-		uapi, err := cfgToUAPI(p)
+		uapi, err := cfgToUAPI(&eff)
 		if err != nil {
 			return err
 		}
 		if err := c.device.IpcSet(uapi); err != nil {
-			return fmt.Errorf("userspace wg ipc: %w", err)
+			if eff.ListenPort > 0 && neteng.IsAddrInUse(err) {
+				eff.ListenPort = 0
+				uapi, err = cfgToUAPI(&eff)
+				if err != nil {
+					return err
+				}
+				if err = c.device.IpcSet(uapi); err != nil {
+					return fmt.Errorf("userspace wg ipc: %w", err)
+				}
+			} else {
+				return fmt.Errorf("userspace wg ipc: %w", err)
+			}
 		}
 		c.device.Up()
 		return nil
 	}
-	cfg, err := buildConfig(p)
+	cfg, err := buildConfig(&eff)
 	if err != nil {
 		return err
 	}
 	if err := c.client.ConfigureDevice(constants.IfaceName, cfg); err != nil {
+		if eff.ListenPort > 0 && neteng.IsAddrInUse(err) {
+			eff.ListenPort = 0
+			cfg, err = buildConfig(&eff)
+			if err != nil {
+				return err
+			}
+			if err = c.client.ConfigureDevice(constants.IfaceName, cfg); err != nil {
+				return fmt.Errorf("configure kernel wg: %w", err)
+			}
+			return nil
+		}
 		return fmt.Errorf("configure kernel wg: %w", err)
 	}
 	return nil

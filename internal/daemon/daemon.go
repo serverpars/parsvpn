@@ -206,7 +206,7 @@ func (d *Daemon) Up(name string) error {
 	_ = d.net.CleanupOrphans()
 	d.ignoreLinkDelete.Store(false)
 
-	session := sessionProfile(p)
+	session := d.sessionProfile(p)
 
 	kernelOK, err := d.net.EnsureKernelWireGuard()
 	if err != nil {
@@ -248,32 +248,28 @@ func (d *Daemon) Up(name string) error {
 // sessionProfile copies p and clears ListenPort when it would collide (e.g. wg0
 // already owns 51820). ListenPort 0 omits the field from wgctrl updates so an
 // already-bound ephemeral port on pv-tun0 is left alone.
-func sessionProfile(p *profile.Profile) *profile.Profile {
+// wg.Configure also applies this; we do it here so d.active reflects the
+// effective port and so Up/Reload logs the coexistence fallback once.
+func (d *Daemon) sessionProfile(p *profile.Profile) *profile.Profile {
 	session := *p
-	if port, conflict := neteng.ResolveListenPort(session.ListenPort); conflict {
+	held := 0
+	if d.wg != nil {
+		held = d.wg.ListenPort()
+	}
+	if port, conflict := neteng.ResolveListenPort(session.ListenPort, held); conflict {
 		log.Printf("listen_port %d already in use — using ephemeral port (coexistence with other WireGuard)", session.ListenPort)
+		session.ListenPort = port
+	} else {
 		session.ListenPort = port
 	}
 	return &session
-}
-
-// configureWGLocked applies WireGuard device config, retrying without a fixed
-// listen port when Configure fails with EADDRINUSE.
-func (d *Daemon) configureWGLocked(p *profile.Profile) error {
-	err := d.wg.Configure(p)
-	if err == nil || p.ListenPort <= 0 || !neteng.IsAddrInUse(err) {
-		return err
-	}
-	log.Printf("listen_port %d failed during configure (%v) — retrying with ephemeral port", p.ListenPort, err)
-	p.ListenPort = 0
-	return d.wg.Configure(p)
 }
 
 // configureAddressLocked applies WireGuard config and brings the link up.
 // If link-up fails with EADDRINUSE on a fixed listen port (race after preflight),
 // retries once with an ephemeral listen port.
 func (d *Daemon) configureAddressLocked(p *profile.Profile) error {
-	if err := d.configureWGLocked(p); err != nil {
+	if err := d.wg.Configure(p); err != nil {
 		return err
 	}
 	err := d.net.AssignAddress(p.Address, p.MTU)
@@ -399,8 +395,9 @@ func (d *Daemon) Reload() error {
 	// Same listen-port coexistence as Up: do not re-bind profile listen_port
 	// onto a port already owned by wg0 (host add/reload was failing with
 	// "configure kernel wg: address already in use").
-	session := sessionProfile(p)
-	if err := d.configureWGLocked(session); err != nil {
+	// wg.Configure also enforces this for Rekey and any future callers.
+	session := d.sessionProfile(p)
+	if err := d.wg.Configure(session); err != nil {
 		return err
 	}
 	if err := d.applyRoutesLocked(session); err != nil {

@@ -14,6 +14,7 @@ type Controller struct{}
 func New() (*Controller, error)                      { return &Controller{}, nil }
 func (c *Controller) Close()                         {}
 func (c *Controller) Userspace() bool                { return false }
+func (c *Controller) ListenPort() int                { return 0 }
 func (c *Controller) StartUserspace(int) error       { return fmt.Errorf("parsvpn requires Linux") }
 func (c *Controller) Configure(*profile.Profile) error {
 	return fmt.Errorf("parsvpn requires Linux")
