@@ -1,149 +1,179 @@
+<div align="center">
+
 # ParsVPN
 
-Standalone, Linux-only WireGuard VPN client for ServerPars. Single static binary with a systemd daemon, Cobra CLI, and Bubbletea TUI. Imports standard WireGuard `.conf` files — no ServerPars API or account required.
+**A standalone WireGuard client for Linux — one static binary with a systemd daemon, a CLI and a terminal dashboard.**
 
-## Design goals
+[![Release](https://img.shields.io/github/v/release/serverpars/parsvpn?style=flat-square&color=0E6B66)](https://github.com/serverpars/parsvpn/releases/latest)
+[![Go](https://img.shields.io/github/go-mod/go-version/serverpars/parsvpn?style=flat-square)](go.mod)
+![Platform](https://img.shields.io/badge/platform-linux%20amd64%20%7C%20arm64-15171A?style=flat-square&logo=linux&logoColor=white)
+![WireGuard](https://img.shields.io/badge/protocol-WireGuard-88171A?style=flat-square&logo=wireguard&logoColor=white)
+![License](https://img.shields.io/badge/license-proprietary-555?style=flat-square)
 
-- Coexist with `wg-quick`, OpenVPN, Tailscale, WARP, StrongSwan
-- Auto listen-port fallback when `51820` (or the profile port) is already taken (e.g. by `wg0`)
-- Isolated interface `pv-tun0`, routing table `51920`, rule priorities `13990` + `14000–16999`
-- Split-tunnel by destination CIDR (never steals the default route by default)
-- Optional exclude mode: tunnel all traffic except bypass CIDRs (e.g. Iran)
-- Exclude-mode return-path: conntrack/fwmark keeps replies to inbound connections on the main table (SSH, CDN, reverse proxy)
-- Optional system DNS override via embedded resolver on `127.0.0.199:53`
-- Optional host overrides via the same embedded DNS
-- Static ELF (`CGO_ENABLED=0`) for CentOS 7 / AlmaLinux 8–9 / Ubuntu 20.04+
+[Install](#-install) · [Quick start](#-quick-start) · [Split tunneling](#-split-tunneling) · [DNS](#-dns) · [Commands](#-command-reference) · [Configuration](#%EF%B8%8F-configuration)
 
-## Infographic
-  <details>
-  <summary><b>📊 Infographic: how ParsVPN works</b></summary>
-  <img src="info.png" alt="ParsVPN infographic">
-  </details>
+</div>
 
-## Install
+---
 
-One-line install (Linux):
+ParsVPN imports standard WireGuard `.conf` files and runs them on an isolated interface with its own routing table, so it works **alongside** `wg-quick`, OpenVPN, Tailscale, Cloudflare WARP and strongSwan instead of fighting them.
+
+## ✨ Features
+
+|   |   |
+|---|---|
+| 🧩 **Coexists with other VPNs** | Own interface (`pv-tun0`), table (`51920`) and rule priorities. Falls back to a free listen port if `51820` is taken (e.g. by `wg0`). |
+| 🔀 **Split tunneling** | Route only chosen CIDRs through the VPN (default), or tunnel everything *except* a bypass list such as the built-in `ir` preset. |
+| ↩️ **Safe full-tunnel** | In exclude mode, replies to inbound connections stay on the main table — SSH, CDN and reverse-proxy traffic keeps working. |
+| 🌐 **Built-in DNS** | Embedded resolver on `127.0.0.199:53` for system DNS override and per-domain host pins (wildcards supported). |
+| 🖥️ **CLI + TUI** | Scriptable commands with `--json` output, plus an interactive dashboard. |
+| 🩺 **Self-healing** | Handshake health checks with automatic rekey, auto-rebuild if the interface disappears, reconnect after reboot. |
+| 🔄 **Auto-updates** | Installs new GitHub releases unattended (opt-out available). |
+| 📦 **Runs anywhere** | Static ELF (`CGO_ENABLED=0`) for CentOS 7, AlmaLinux 8–9 and Ubuntu 20.04+. Kernel WireGuard when available, userspace fallback when not. |
+
+<details>
+<summary><b>📊 Infographic: how ParsVPN works</b></summary>
+<br>
+<img src="info.png" alt="ParsVPN infographic">
+</details>
+
+## 📥 Install
 
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/serverpars/parsvpn/main/scripts/install.sh)"
 ```
 
+The installer detects `amd64` / `arm64`, installs the binary to `/usr/local/bin/parsvpn` and enables the `parsvpn` systemd service. Pin a version with `PARSVPN_VERSION=v1.6.14`.
+
+<details>
+<summary>Other install options</summary>
+
 ```bash
 # From a prebuilt binary
 sudo ./scripts/install.sh ./dist/parsvpn-linux-amd64
 
-# Or build locally (on Linux / WSL)
+# Build locally (Linux / WSL)
 ./scripts/build.sh
 sudo ./scripts/install.sh ./dist/parsvpn-linux-amd64
 ```
 
-## Usage
+</details>
+
+## 🚀 Quick start
 
 ```bash
-# Import a WireGuard config
+# 1. Import a WireGuard config
 sudo parsvpn profile add --file ./office.conf --name office
 
-# Paste / pipe a WireGuard config
-cat office.conf | sudo parsvpn profile add --file - --name office
-
-# Create an empty tunnel (edit the JSON before connecting)
-sudo parsvpn profile add --empty --name scratch
-
-# Connect / disconnect
+# 2. Connect
 sudo parsvpn up office
-parsvpn status --json
+
+# 3. Check status
+parsvpn status
+
+# 4. Disconnect
 sudo parsvpn down
-
-# Auto-connect after reboot (default: on). Explicit down clears the saved profile.
-parsvpn autostart                 # shows: autostart on/off + which profile reconnects
-sudo parsvpn autostart off
-sudo parsvpn autostart on
-
-# Interactive dashboard (press [a] add; [e] edit; [p] presets; [s] settings)
-sudo parsvpn
-
-# Check / install updates (daemon also auto-updates by default)
-parsvpn update --check
-sudo parsvpn update
-sudo parsvpn update --disable-auto   # opt out of autopilot
-
-# Uninstall (keeps /etc/parsvpn unless --purge)
-sudo parsvpn uninstall
-sudo parsvpn uninstall --purge --yes
 ```
 
-### Settings (TUI)
+Or just run `sudo parsvpn` to open the dashboard.
 
-Press **[s]** in the dashboard to change global options:
+> [!TIP]
+> You can also pipe a config in: `cat office.conf | sudo parsvpn profile add --file - --name office`, or start from an empty tunnel with `--empty` and edit its JSON before connecting.
 
-| Setting | What it does |
-|---------|----------------|
-| Auto-update | Unattended GitHub release installs (default on) |
-| Auto-start | Reconnect last profile after reboot (default on) |
-| Update check interval | How often the daemon polls for releases |
-| Reconnects as | Which profile auto-start restores (`c` clears it) |
+### Dashboard keys
 
-CLI: `parsvpn autoupdate on|off`, `parsvpn autostart on|off`.
+| Key | Action |
+|:---:|--------|
+| `a` | Add a profile |
+| `e` | Edit a profile (routes, split mode, DNS) |
+| `p` | Manage bypass presets |
+| `s` | Settings (auto-update, auto-start, check interval) |
+| `t` | Live traffic view |
 
-### Presets (TUI)
+## 🔀 Split tunneling
 
-Press **[p]** to manage bypass presets (same as `parsvpn preset …`). Apply a preset to a profile via **[e] → Split** (select `ir`, `none`, or any custom preset).
-
-### Routes, hosts, DNS, and split mode
+| Mode | What goes through the VPN | Use it when |
+|------|---------------------------|-------------|
+| **`include`** *(default)* | Only the listed IP ranges | You need access to a private network but want normal internet as usual |
+| **`exclude`** | Everything **except** the bypass list and the VPN endpoint | You want full-tunnel but keep certain destinations local |
 
 ```bash
-# List / add / remove split IP ranges (include: via tunnel; exclude: bypass)
+# Include mode: manage routed ranges
 parsvpn route list office
 sudo parsvpn route add office 10.10.0.0/16 203.0.113.0/24
-sudo parsvpn route rm office 203.0.113.0/24
+sudo parsvpn route rm  office 203.0.113.0/24
 
-# DNS host overrides (embedded resolver pins)
-parsvpn host list office
-sudo parsvpn host add office example.com          # resolve via tunnel DNS, pin + route
-sudo parsvpn host add office example.com --www    # also pin www.example.com
-sudo parsvpn host add office '*.github.com'       # all subdomains → same IP (resolves github.com)
-sudo parsvpn host add office db.internal 10.10.0.50  # optional explicit IP
-sudo parsvpn host rm office example.com
-
-# Override system DNS while connected (bypasses ISP filtering e.g. youtube → 10.10.34.35)
-parsvpn dns show office
-sudo parsvpn dns override office on          # forward all DNS via tunnel (1.1.1.1 by default)
-sudo parsvpn dns set office 1.1.1.1 8.8.8.8  # set upstream + enable override
-sudo parsvpn dns override office off
-
-# Tunnel everything except Iran (preset enables exclude mode)
+# Exclude mode: tunnel everything except Iran IPv4 ranges
 sudo parsvpn split preset office ir
-sudo parsvpn up office
 
-# Custom bypass presets (IPs, CIDRs, hosts) — stored in /etc/parsvpn/presets/
-sudo parsvpn preset new office-net
-sudo parsvpn preset add office-net 10.0.0.0/8 1.2.3.4 intranet.local '*.corp.example'
-parsvpn preset show office-net
-sudo parsvpn split preset office office-net   # apply to profile (exclude mode)
-sudo parsvpn preset rm office-net 1.2.3.4
-sudo parsvpn preset delete office-net
-
-# Live traffic debug (DNS queries + packets on pv-tun0)
-parsvpn traffic
-parsvpn traffic -f            # follow
-# TUI: press [t]
-
-# Back to classic split-tunnel (only listed CIDRs via VPN)
-sudo parsvpn split mode office include
+# Back to include mode
+sudo parsvpn split mode   office include
 sudo parsvpn split preset office none
 ```
 
-If the profile is active, route/host/dns/split changes are saved and the daemon reloads automatically.
+### Custom bypass presets
 
-Daemon (started by systemd):
+Presets can hold IPs, CIDRs and hostnames (including wildcards). They're stored in `/etc/parsvpn/presets/`.
 
 ```bash
-sudo systemctl status parsvpn
+sudo parsvpn preset new office-net
+sudo parsvpn preset add office-net 10.0.0.0/8 1.2.3.4 intranet.local '*.corp.example'
+parsvpn preset show office-net
+sudo parsvpn split preset office office-net   # apply (switches to exclude mode)
+sudo parsvpn preset rm office-net 1.2.3.4
+sudo parsvpn preset delete office-net
 ```
 
-## Profile JSON
+> [!NOTE]
+> When the profile is connected, changes to routes, hosts, DNS or split mode are saved and applied immediately — no reconnect needed.
 
-Profiles live in `/etc/parsvpn/profiles/<name>.json` (`0600`). Importing a `.conf` fills `split_tunnel.ip_ranges` from peer `AllowedIPs`, dropping `0.0.0.0/0` and `::/0` so include-mode stays split-only.
+## 🌐 DNS
+
+### System DNS override
+
+Send all of the machine's DNS through the tunnel while connected — useful for getting around ISP DNS filtering.
+
+```bash
+parsvpn dns show office
+sudo parsvpn dns override office on            # upstream defaults to 1.1.1.1
+sudo parsvpn dns set office 1.1.1.1 8.8.8.8    # custom upstream (also enables override)
+sudo parsvpn dns override office off
+```
+
+Importing a `.conf` that contains `DNS=` turns this on automatically. ParsVPN uses `systemd-resolved` when present, and otherwise manages `/etc/resolv.conf` with a backup that is restored on disconnect.
+
+### Host pins
+
+Resolve a domain through the tunnel's DNS, pin the answer, and route that IP through the VPN.
+
+```bash
+parsvpn host list office
+sudo parsvpn host add office example.com              # resolve, pin + route
+sudo parsvpn host add office example.com --www        # also pin www.example.com
+sudo parsvpn host add office '*.github.com'           # all subdomains → same IP
+sudo parsvpn host add office db.internal 10.10.0.50   # explicit IP
+sudo parsvpn host rm  office example.com
+```
+
+## 📖 Command reference
+
+| Area | Commands |
+|------|----------|
+| **Connection** | `up <profile>` · `down` · `status [--json]` |
+| **Profiles** | `profile add --file <path\|-> [--name]` · `profile add --empty --name <n>` · `profile list` · `profile delete <n>` |
+| **Routing** | `route list\|add\|rm` · `split mode <include\|exclude>` · `split preset <ir\|none\|name>` |
+| **Presets** | `preset list` · `preset show\|new\|delete <n>` · `preset add\|rm <n> <entries…>` |
+| **DNS** | `dns show` · `dns override <on\|off>` · `dns set <ip…>` · `dns clear` · `host list\|add\|rm` |
+| **Debugging** | `traffic [-f] [-n N] [--clear]` — recent DNS queries and packets on `pv-tun0` |
+| **Lifecycle** | `autostart [on\|off]` · `autoupdate [on\|off]` · `update [--check] [--force]` · `uninstall [--purge] [--yes]` |
+
+Run `parsvpn <command> --help` for details. The daemon runs under systemd: `sudo systemctl status parsvpn`.
+
+## ⚙️ Configuration
+
+### Profile file
+
+Profiles live in `/etc/parsvpn/profiles/<name>.json` with mode `0600`.
 
 ```json
 {
@@ -165,47 +195,58 @@ Profiles live in `/etc/parsvpn/profiles/<name>.json` (`0600`). Importing a `.con
     "bypass_preset": "",
     "ip_ranges": ["10.10.0.0/16"],
     "host_overrides": [
-      {"domain": "db.internal", "ip": "10.10.0.50"}
+      { "domain": "db.internal", "ip": "10.10.0.50" }
     ]
   }
 }
 ```
 
-- `mode: "include"` (default): `ip_ranges` go through the tunnel.
-- `mode: "exclude"`: everything goes through the tunnel except `ip_ranges` plus `bypass_preset` (e.g. `"ir"` for Iran IPv4). WireGuard AllowedIPs are forced to include `0.0.0.0/0`; the peer endpoint is always bypassed. Inbound connections that arrive on a non-tunnel interface are conntrack-marked (`fwmark 0x5192`) so their replies stay on the main table (fixes SSH/CDN/reverse-proxy breakage under full-tunnel).
-- `override_system_dns: true`: while connected, all system DNS is routed through the embedded proxy to `dns` (or `1.1.1.1`). Importing a WireGuard conf with `DNS=` enables this automatically.
+<details>
+<summary>Field notes</summary>
 
-## Isolation map
+- **`split_tunnel.mode: "include"`** — `ip_ranges` go through the tunnel. When importing a `.conf`, `ip_ranges` is filled from the peer's `AllowedIPs`, with `0.0.0.0/0` and `::/0` dropped so imports stay split-only.
+- **`split_tunnel.mode: "exclude"`** — everything goes through the tunnel except `ip_ranges` plus `bypass_preset`. WireGuard `AllowedIPs` are forced to `0.0.0.0/0`, and the peer endpoint is always bypassed. Inbound connections arriving on other interfaces are conntrack-marked (`fwmark 0x5192`) so their replies stay on the main table.
+- **`override_system_dns: true`** — all system DNS goes through the embedded proxy to `dns` (or `1.1.1.1`).
+
+</details>
+
+### Updates & auto-start
+
+| Behavior | Default | How to change |
+|----------|:-------:|---------------|
+| **Auto-update** — checks GitHub ~45 s after start, then hourly, installs new releases and restarts the service | On | `sudo parsvpn autoupdate off` or `"auto_update": false` in `/etc/parsvpn/config.json` |
+| **Auto-start** — reconnects the last profile after reboot | On | `sudo parsvpn autostart off` or `"auto_connect": false` in `/etc/parsvpn/config.json` |
+
+`parsvpn down` clears the saved auto-start profile. To update manually: `parsvpn update --check`, then `sudo parsvpn update`.
+
+### Isolation map
 
 | Component | Value |
-|-----------|--------|
+|-----------|-------|
 | Interface | `pv-tun0` |
-| Table | `51920` |
-| FwMark | `0x5192` (exclude-mode return-path) |
-| Rule prefs | `13990` (return-path), `14000–16999` (split/bypass/catch-all) |
-| nftables | `inet parsvpn` (exclude-mode CONNMARK; iptables fallback) |
-| Config | `/etc/parsvpn/` (`profiles/`, `config.json`) |
-| Socket | `/var/run/parsvpn/daemon.sock` |
-| Lock | `/var/run/parsvpn/daemon.lock` |
+| Routing table | `51920` |
+| Firewall mark | `0x5192` (exclude-mode return path) |
+| Rule priorities | `13990` (return path), `14000–16999` (split / bypass / catch-all) |
+| nftables | `inet parsvpn` (iptables fallback) |
+| Config | `/etc/parsvpn/` — `profiles/`, `presets/`, `config.json` |
+| Socket / lock | `/var/run/parsvpn/daemon.sock`, `/var/run/parsvpn/daemon.lock` |
 
-## Updates
+## 🗑️ Uninstall
 
-ParsVPN checks GitHub releases (`serverpars/parsvpn`) for newer versions.
+```bash
+sudo parsvpn uninstall                 # keeps /etc/parsvpn
+sudo parsvpn uninstall --purge --yes   # removes profiles, presets and config too
+```
 
-- **Autopilot / autoupdate (default on):** the daemon checks GitHub ~45s after start, then about every hour, and installs newer releases unattended (service restart). Toggle: `parsvpn autoupdate on|off`.
-- **Auto-connect (default on):** after reboot, the daemon brings up the last profile from `parsvpn up`. Disable with `parsvpn autostart off` or `"auto_connect": false` in `/etc/parsvpn/config.json`. Explicit `parsvpn down` clears the saved profile.
-- **Manual:** `parsvpn update --check` / `sudo parsvpn update` (CLI/TUI re-exec into the new binary after install)
-- **Opt out of updates:** `sudo parsvpn autoupdate off` or `sudo parsvpn update --disable-auto` or `"auto_update": false` in `/etc/parsvpn/config.json`
-
-## Development
+## 🛠️ Development
 
 ```bash
 go test ./...
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/parsvpn ./cmd/parsvpn
 ```
 
-Coexistence smoke tests: see [`tests/coexist/`](tests/coexist/).
+Coexistence smoke tests (Docker): see [`tests/coexist/`](tests/coexist/).
 
-## License
+## 📄 License
 
-Proprietary — ServerPars / pars.host
+Proprietary — © [ServerPars](https://pars.host). All rights reserved.
