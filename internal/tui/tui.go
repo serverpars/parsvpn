@@ -350,6 +350,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Refresh status in the background, but never as the only signal that
 		// could clear the edit error (statusMsg must not wipe m.err here).
 		return m, tea.Batch(cmd, refreshStatus)
+	case editPresetSavedMsg:
+		// Profile JSON already has the new preset — refresh the Split list now,
+		// then apply routes asynchronously so a slow reload can't hide the change.
+		m.err = ""
+		m.notice = msg.message
+		m.nameInput.Blur()
+		m.nameInput.Placeholder = "profile-name"
+		next, cmd := m.openEditSplit()
+		m = next.(model)
+		return m, tea.Batch(cmd, applyPresetReload(msg.profile), refreshStatus)
 	case presetDoneMsg:
 		if msg.err != nil {
 			m.err = msg.err.Error()

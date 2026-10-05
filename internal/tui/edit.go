@@ -298,6 +298,21 @@ func (m *model) refreshSplitPresetList() {
 		}
 	}
 	m.editList.SetItems(items)
+	// Cursor on the active preset (or exclude mode) so Enter applies the obvious choice.
+	selectID := "none"
+	if curPreset != "none" {
+		selectID = curPreset
+	} else if mode == profile.SplitModeExclude {
+		selectID = "mode:exclude"
+	} else {
+		selectID = "mode:include"
+	}
+	for i, it := range items {
+		if pi, ok := it.(presetListItem); ok && pi.id == selectID {
+			m.editList.Select(i)
+			break
+		}
+	}
 	m.editList.Title = fmt.Sprintf("Split — %s", m.editProfile)
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = true
@@ -322,12 +337,23 @@ func (m model) updateEditSplit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, editSetMode(m.editProfile, profile.SplitModeInclude)
 	case "x":
 		return m, editSetMode(m.editProfile, profile.SplitModeExclude)
+	case "1":
+		return m, editSetPreset(m.editProfile, "ir")
+	case "0":
+		return m, editSetPreset(m.editProfile, "none")
 	case "m":
 		next, cmd := m.openPresets()
 		return next, cmd
 	case "enter", " ":
-		it, ok := m.editList.SelectedItem().(presetListItem)
+		items := m.editList.Items()
+		idx := m.editList.Index()
+		if idx < 0 || idx >= len(items) {
+			m.err = "no item selected"
+			return m, nil
+		}
+		it, ok := items[idx].(presetListItem)
 		if !ok {
+			m.err = "no item selected"
 			return m, nil
 		}
 		switch it.id {
@@ -517,15 +543,51 @@ func editSetPreset(profileName, presetName string) tea.Cmd {
 		if err := p.SetBypassPreset(presetName); err != nil {
 			return editDoneMsg{err: err, reopen: "split"}
 		}
-		applied, err := saveAndReload(p)
+		// Persist first so the Split UI can show the new preset immediately.
+		if err := profile.Save(p); err != nil {
+			return editDoneMsg{err: fmt.Errorf("save: %w (try running as root)", err), reopen: "split"}
+		}
+		check, err := profile.Load(profileName)
 		if err != nil {
 			return editDoneMsg{err: err, reopen: "split"}
 		}
-		msg := fmt.Sprintf("mode=%s preset=none", p.EffectiveMode())
-		if p.SplitTunnel.BypassPreset != "" {
-			msg = fmt.Sprintf("mode=%s preset=%s", p.EffectiveMode(), p.SplitTunnel.BypassPreset)
+		if check.SplitTunnel.BypassPreset != p.SplitTunnel.BypassPreset {
+			return editDoneMsg{
+				err:    fmt.Errorf("preset did not persist (disk has %q)", check.SplitTunnel.BypassPreset),
+				reopen: "split",
+			}
 		}
-		return editDoneMsg{message: msg + applyNote(applied), reopen: "split"}
+		label := "none"
+		if p.SplitTunnel.BypassPreset != "" {
+			label = p.SplitTunnel.BypassPreset
+		}
+		return editPresetSavedMsg{
+			profile: profileName,
+			message: fmt.Sprintf("mode=%s preset=%s — applying to tunnel…", p.EffectiveMode(), label),
+		}
+	}
+}
+
+// editPresetSavedMsg means the profile JSON is updated; routes still need reload.
+type editPresetSavedMsg struct {
+	profile string
+	message string
+}
+
+func applyPresetReload(profileName string) tea.Cmd {
+	return func() tea.Msg {
+		resp, err := ipc.Call(ipc.Request{Cmd: "status"})
+		if err != nil || resp.Status == nil || !resp.Status.Active || resp.Status.Profile != profileName {
+			return editDoneMsg{message: "preset saved (connect to apply)", reopen: "split"}
+		}
+		reload, err := ipc.Call(ipc.Request{Cmd: "reload"})
+		if err != nil {
+			return editDoneMsg{err: fmt.Errorf("preset saved, but apply failed: %w", err), reopen: "split"}
+		}
+		if !reload.OK {
+			return editDoneMsg{err: fmt.Errorf("preset saved, but apply failed: %s", reload.Error), reopen: "split"}
+		}
+		return editDoneMsg{message: "preset applied to active tunnel", reopen: "split"}
 	}
 }
 
@@ -687,7 +749,7 @@ func (m model) viewEditSplit() string {
 	}
 	hint := fmt.Sprintf("Current: mode=%s  preset=%s\n", mode, presetName) +
 		"Select Mode: include / Mode: exclude, or a bypass preset, then press enter.\n" +
-		"Shortcuts: [i] include  [x] exclude  [m] manage custom presets"
+		"Shortcuts: [i] include  [x] exclude  [1] ir  [0] none  [m] manage custom presets"
 	var errLine string
 	if m.err != "" {
 		errLine = "\nError: " + m.err + "\n"

@@ -17,6 +17,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Large bypass lists (Iran ~2k CIDRs) must not fall back to per-CIDR ip rules —
+// that hangs reload/TUI for minutes. Prefer nft; error clearly when it fails.
+const bypassSlowFallbackMax = 64
+
 func (e *Engine) applyExcludeBypass(bypass []string, endpointHost string) error {
 	cidrs := make([]string, 0, len(bypass)+1)
 	seen := map[string]struct{}{}
@@ -48,14 +52,19 @@ func (e *Engine) applyExcludeBypass(bypass []string, endpointHost string) error 
 		return nil
 	}
 
-	// Prefer nft set for large (or any) lists when nft exists — one rule, fast apply.
 	if _, err := exec.LookPath("nft"); err == nil {
-		if err := e.applyBypassNFT(cidrs); err == nil {
+		if err := e.applyBypassNFT(cidrs); err != nil {
+			if len(cidrs) > bypassSlowFallbackMax {
+				return fmt.Errorf("bypass nft set failed (%w); not falling back to %d ip rules", err, len(cidrs))
+			}
+			e.flushBypassNFT()
+		} else {
 			return e.applyBypassMarkRule()
 		}
-		// Fall through to per-CIDR rules if nft apply fails.
-		e.flushBypassNFT()
+	} else if len(cidrs) > bypassSlowFallbackMax {
+		return fmt.Errorf("nft is required for large bypass presets (%d CIDRs); install nftables", len(cidrs))
 	}
+
 	return e.applyBypassRules(cidrs)
 }
 
@@ -106,36 +115,22 @@ func (e *Engine) applyBypassRules(cidrs []string) error {
 
 func (e *Engine) applyBypassNFT(cidrs []string) error {
 	e.flushBypassNFT()
+	elems := normalizeBypassV4Elements(cidrs)
+	if len(elems) == 0 {
+		return fmt.Errorf("bypass nft: no IPv4 CIDRs to install")
+	}
+
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("table inet %s {\n", constants.NFTBypassTable))
-	b.WriteString("\tset nets {\n\t\ttype ipv4_addr\n\t\tflags interval\n\t\telements = {\n")
-	n := 0
-	for _, c := range cidrs {
-		c = strings.TrimSpace(c)
-		if c == "" {
-			continue
-		}
-		// nft interval sets want CIDR or host; bare IP → /32.
-		if ip := net.ParseIP(c); ip != nil {
-			if v4 := ip.To4(); v4 != nil {
-				c = v4.String() + "/32"
-			} else {
-				// IPv6 bypass via nft set would need a separate ipv6_addr set;
-				// fall back to per-rule path for v6-only entries by skipping here
-				// only if we have no v4 — for mixed lists, v6 still needs rules.
-				continue
-			}
-		} else if _, _, err := net.ParseCIDR(c); err != nil {
-			continue
-		} else if strings.Contains(c, ":") {
-			continue // skip v6 in v4 set
-		}
-		if n > 0 {
+	// auto-merge is required: country lists often contain overlapping prefixes,
+	// and nft rejects interval sets without it.
+	b.WriteString("\tset nets {\n\t\ttype ipv4_addr\n\t\tflags interval\n\t\tauto-merge\n\t\telements = {\n")
+	for i, c := range elems {
+		if i > 0 {
 			b.WriteString(",\n")
 		}
 		b.WriteString("\t\t\t")
 		b.WriteString(c)
-		n++
 	}
 	b.WriteString("\n\t\t}\n\t}\n")
 	mark := constants.BypassFwMark
@@ -149,9 +144,6 @@ func (e *Engine) applyBypassNFT(cidrs []string) error {
 	}
 }
 `, mark, mark))
-	if n == 0 {
-		return fmt.Errorf("bypass nft: no IPv4 CIDRs to install")
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -166,6 +158,32 @@ func (e *Engine) applyBypassNFT(cidrs []string) error {
 		return fmt.Errorf("nft bypass: %w (%s)", err, bytes.TrimSpace(out))
 	}
 	return nil
+}
+
+func normalizeBypassV4Elements(cidrs []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(cidrs))
+	for _, c := range cidrs {
+		c = strings.TrimSpace(c)
+		if c == "" || strings.Contains(c, ":") {
+			continue
+		}
+		if ip := net.ParseIP(c); ip != nil {
+			if v4 := ip.To4(); v4 != nil {
+				c = v4.String() + "/32"
+			} else {
+				continue
+			}
+		} else if _, _, err := net.ParseCIDR(c); err != nil {
+			continue
+		}
+		if _, ok := seen[c]; ok {
+			continue
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+	}
+	return out
 }
 
 func (e *Engine) flushBypassNFT() {
