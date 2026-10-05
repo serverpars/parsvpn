@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/serverpars/parsvpn/internal/constants"
@@ -525,17 +526,23 @@ func RoutingDomainForOverride(domain string) string {
 }
 
 // SetSplitMode sets include|exclude.
-// Switching to include clears bypass_preset (presets only apply in exclude mode);
-// otherwise Save→Normalize would silently force exclude again.
+// Switching to include clears bypass_preset (presets only apply in exclude mode)
+// and ensures upstream DNS /32s are in ip_ranges so lookups can traverse the tunnel.
+// Switching to exclude strips resolver /32s from ip_ranges — in exclude mode those
+// entries become bypasses (stay on main) and commonly break DNS resolution.
 func (p *Profile) SetSplitMode(mode string) error {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode != SplitModeInclude && mode != SplitModeExclude {
 		return fmt.Errorf("invalid mode %q (use include|exclude)", mode)
 	}
 	p.SplitTunnel.Mode = mode
-	if mode == SplitModeInclude && p.SplitTunnel.BypassPreset != "" {
-		p.SplitTunnel.BypassPreset = ""
+	if mode == SplitModeInclude {
+		if p.SplitTunnel.BypassPreset != "" {
+			p.SplitTunnel.BypassPreset = ""
+		}
+		return p.EnsureDNSRoutes()
 	}
+	p.StripResolverRoutes()
 	return nil
 }
 
@@ -554,11 +561,13 @@ func (p *Profile) SetBypassPreset(name string) error {
 		}
 		p.SplitTunnel.Mode = SplitModeExclude
 		p.SplitTunnel.BypassPreset = name
+		p.StripResolverRoutes()
 		return nil
 	}
 	p.SplitTunnel.BypassPreset = ""
 	if p.EffectiveMode() == SplitModeExclude && len(p.SplitTunnel.IPRanges) == 0 {
 		p.SplitTunnel.Mode = SplitModeInclude
+		return p.EnsureDNSRoutes()
 	}
 	return nil
 }
@@ -691,4 +700,169 @@ func (p *Profile) EnsureResolverRouted(dnsHost string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// wellKnownResolvers are public DNS IPs commonly auto-added as include-mode
+// routes (EnsureResolverRouted / profile DNS). Stripped on switch to exclude.
+var wellKnownResolvers = []string{
+	"1.1.1.1", "1.0.0.1",
+	"8.8.8.8", "8.8.4.4",
+	"9.9.9.9", "149.112.112.112",
+}
+
+// EnsureDNSRoutes adds every configured DNS server (or the 1.1.1.1 fallback)
+// as include-mode /32 routes. No-op outside include mode.
+func (p *Profile) EnsureDNSRoutes() error {
+	if p.EffectiveMode() != SplitModeInclude {
+		return nil
+	}
+	servers := append([]string(nil), p.DNS...)
+	if len(servers) == 0 {
+		servers = []string{p.UpstreamDNSHost()}
+	}
+	for _, s := range servers {
+		host := s
+		if h, _, err := net.SplitHostPort(s); err == nil {
+			host = h
+		}
+		if _, err := p.EnsureResolverRouted(host); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// StripResolverRoutes removes profile DNS and well-known public resolver /32s
+// from ip_ranges. In exclude mode those entries bypass the tunnel and break
+// resolution when override_system_dns expects the upstream via the VPN.
+// Returns the CIDRs that were removed.
+func (p *Profile) StripResolverRoutes() []string {
+	want := map[string]struct{}{}
+	addHost := func(host string) {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			return
+		}
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		ip := net.ParseIP(host)
+		if ip == nil {
+			return
+		}
+		s := ip.String()
+		want[s] = struct{}{}
+		if ip.To4() != nil {
+			want[s+"/32"] = struct{}{}
+		} else {
+			want[s+"/128"] = struct{}{}
+		}
+	}
+	for _, d := range p.DNS {
+		addHost(d)
+	}
+	addHost(p.UpstreamDNSHost())
+	for _, h := range wellKnownResolvers {
+		addHost(h)
+	}
+
+	var removed []string
+	out := p.SplitTunnel.IPRanges[:0]
+	for _, c := range p.SplitTunnel.IPRanges {
+		key := strings.TrimSpace(c)
+		if _, ok := want[key]; ok {
+			removed = append(removed, c)
+			continue
+		}
+		if ip := net.ParseIP(key); ip != nil {
+			if _, ok := want[ip.String()]; ok {
+				removed = append(removed, c)
+				continue
+			}
+		}
+		if _, n, err := net.ParseCIDR(key); err == nil {
+			ones, bits := n.Mask.Size()
+			if ones == bits {
+				if _, ok := want[n.IP.String()]; ok {
+					removed = append(removed, c)
+					continue
+				}
+			}
+		}
+		out = append(out, c)
+	}
+	p.SplitTunnel.IPRanges = out
+	return removed
+}
+
+// DNSRoutesChangeNote summarizes resolver /32 add/remove between two route lists.
+// Extra DNS hosts (profile.DNS) are treated as resolvers in addition to well-known ones.
+func DNSRoutesChangeNote(before, after []string, dnsServers ...string) string {
+	bSet := map[string]struct{}{}
+	aSet := map[string]struct{}{}
+	for _, c := range before {
+		if isResolverRoute(c, dnsServers...) {
+			bSet[c] = struct{}{}
+		}
+	}
+	for _, c := range after {
+		if isResolverRoute(c, dnsServers...) {
+			aSet[c] = struct{}{}
+		}
+	}
+	var added, removed []string
+	for c := range aSet {
+		if _, ok := bSet[c]; !ok {
+			added = append(added, c)
+		}
+	}
+	for c := range bSet {
+		if _, ok := aSet[c]; !ok {
+			removed = append(removed, c)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	switch {
+	case len(added) > 0 && len(removed) > 0:
+		return fmt.Sprintf("dns routes +%s -%s", strings.Join(added, ","), strings.Join(removed, ","))
+	case len(added) > 0:
+		return "added dns route " + strings.Join(added, ", ")
+	case len(removed) > 0:
+		return "removed dns route " + strings.Join(removed, ", ")
+	default:
+		return ""
+	}
+}
+
+func isResolverRoute(c string, extra ...string) bool {
+	c = strings.TrimSpace(c)
+	ip := net.ParseIP(c)
+	if ip == nil {
+		if _, n, err := net.ParseCIDR(c); err == nil {
+			ones, bits := n.Mask.Size()
+			if ones != bits {
+				return false
+			}
+			ip = n.IP
+		} else {
+			return false
+		}
+	}
+	s := ip.String()
+	for _, d := range extra {
+		d = strings.TrimSpace(d)
+		if h, _, err := net.SplitHostPort(d); err == nil {
+			d = h
+		}
+		if s == d {
+			return true
+		}
+	}
+	for _, d := range wellKnownResolvers {
+		if s == d {
+			return true
+		}
+	}
+	return false
 }

@@ -385,11 +385,85 @@ func TestSetSplitModeIncludeClearsPreset(t *testing.T) {
 	if p.SplitTunnel.BypassPreset != "" {
 		t.Fatalf("preset should be cleared, got %q", p.SplitTunnel.BypassPreset)
 	}
+	// Include mode auto-adds the upstream resolver /32.
+	found := false
+	for _, c := range p.SplitTunnel.IPRanges {
+		if c == "1.1.1.1/32" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected 1.1.1.1/32 after switch to include, got %#v", p.SplitTunnel.IPRanges)
+	}
 	if err := p.Normalize(); err != nil {
 		t.Fatal(err)
 	}
 	if p.EffectiveMode() != SplitModeInclude {
 		t.Fatalf("Normalize should keep include after clearing preset, got %s", p.EffectiveMode())
+	}
+}
+
+func TestSetSplitModeDNSRouteToggle(t *testing.T) {
+	p := &Profile{
+		Name:              "r",
+		PrivateKey:        "k",
+		Address:           "10.0.0.2/32",
+		DNS:               []string{"8.8.8.8"},
+		OverrideSystemDNS: true,
+		Peers:             []Peer{{PublicKey: "p", AllowedIPs: []string{"0.0.0.0/0"}}},
+		SplitTunnel: SplitTunnel{
+			Mode:     SplitModeInclude,
+			IPRanges: []string{"10.1.0.0/24", "8.8.8.8/32", "1.1.1.1/32"},
+		},
+	}
+	if err := p.SetSplitMode(SplitModeExclude); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range p.SplitTunnel.IPRanges {
+		if c == "8.8.8.8/32" || c == "1.1.1.1/32" {
+			t.Fatalf("resolver route should be stripped on exclude: %#v", p.SplitTunnel.IPRanges)
+		}
+	}
+	if len(p.SplitTunnel.IPRanges) != 1 || p.SplitTunnel.IPRanges[0] != "10.1.0.0/24" {
+		t.Fatalf("non-DNS routes should remain: %#v", p.SplitTunnel.IPRanges)
+	}
+
+	if err := p.SetSplitMode(SplitModeInclude); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range p.SplitTunnel.IPRanges {
+		if c == "8.8.8.8/32" {
+			found = true
+		}
+		if c == "1.1.1.1/32" {
+			t.Fatal("should not re-add unrelated 1.1.1.1 when DNS is 8.8.8.8")
+		}
+	}
+	if !found {
+		t.Fatalf("expected 8.8.8.8/32 after switch to include: %#v", p.SplitTunnel.IPRanges)
+	}
+}
+
+func TestSetBypassPresetStripsResolverRoutes(t *testing.T) {
+	p := &Profile{
+		Name:       "r",
+		PrivateKey: "k",
+		Address:    "10.0.0.2/32",
+		DNS:        []string{"8.8.8.8"},
+		Peers:      []Peer{{PublicKey: "p", AllowedIPs: []string{"0.0.0.0/0"}}},
+		SplitTunnel: SplitTunnel{
+			Mode:     SplitModeInclude,
+			IPRanges: []string{"8.8.8.8/32", "203.0.113.0/24"},
+		},
+	}
+	if err := p.SetBypassPreset("ir"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range p.SplitTunnel.IPRanges {
+		if c == "8.8.8.8/32" {
+			t.Fatal("8.8.8.8/32 should be stripped when enabling IR preset")
+		}
 	}
 }
 

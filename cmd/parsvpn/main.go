@@ -543,17 +543,21 @@ func cmdSplit() *cobra.Command {
 				return err
 			}
 			hadPreset := p.SplitTunnel.BypassPreset != ""
+			before := append([]string(nil), p.SplitTunnel.IPRanges...)
 			if err := p.SetSplitMode(args[1]); err != nil {
 				return err
 			}
 			if err := saveProfileAndReload(p); err != nil {
 				return err
 			}
+			msg := fmt.Sprintf("profile %s mode=%s", p.Name, p.EffectiveMode())
 			if args[1] == profile.SplitModeInclude && hadPreset {
-				fmt.Printf("profile %s mode=%s (cleared bypass preset)\n", p.Name, p.EffectiveMode())
-			} else {
-				fmt.Printf("profile %s mode=%s\n", p.Name, p.EffectiveMode())
+				msg += " (cleared bypass preset)"
 			}
+			if dnsRouteNote := profile.DNSRoutesChangeNote(before, p.SplitTunnel.IPRanges, p.DNS...); dnsRouteNote != "" {
+				msg += " (" + dnsRouteNote + ")"
+			}
+			fmt.Println(msg)
 			return nil
 		},
 	}

@@ -519,6 +519,7 @@ func editSetMode(profileName, mode string) tea.Cmd {
 			return editDoneMsg{err: err, reopen: "split"}
 		}
 		clearedPreset := mode == profile.SplitModeInclude && p.SplitTunnel.BypassPreset != ""
+		before := append([]string(nil), p.SplitTunnel.IPRanges...)
 		if err := p.SetSplitMode(mode); err != nil {
 			return editDoneMsg{err: err, reopen: "split"}
 		}
@@ -529,6 +530,9 @@ func editSetMode(profileName, mode string) tea.Cmd {
 		msg := "mode=" + mode
 		if clearedPreset {
 			msg += " (cleared Iran preset)"
+		}
+		if note := profile.DNSRoutesChangeNote(before, p.SplitTunnel.IPRanges, p.DNS...); note != "" {
+			msg += " (" + note + ")"
 		}
 		return editDoneMsg{message: msg + applyNote(applied), reopen: "split"}
 	}
