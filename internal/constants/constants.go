@@ -4,7 +4,7 @@ import "time"
 
 const (
 	AppName    = "parsvpn"
-	Version    = "1.6.16"
+	Version    = "1.6.17"
 	IfaceName  = "pv-tun0"
 	RouteTable = 51920
 	// FwMark marks conntrack entries for inbound connections that arrived on a
@@ -23,6 +23,10 @@ const (
 	// Must be lower (higher priority) than RulePrefCatchAll and outside the
 	// destination/bypass allocator band so it is never consumed by pref++.
 	RulePrefReturnPath = 13990
+	// RulePrefEndpoint is a destination→main rule for the WireGuard peer
+	// endpoint. Must not depend on fwmark/nft: if handshake packets follow the
+	// catch-all into the tunnel, the tunnel can never come up.
+	RulePrefEndpoint = 13991
 	// RulePrefBypassMark is fwmark→main for exclude-mode nft/ipset bypass sets.
 	RulePrefBypassMark = 13995
 

@@ -155,8 +155,8 @@ func (e *Engine) ApplyExcludeRoutes(bypass []string, endpointHost string) error 
 		return fmt.Errorf("default route table %d: %w", e.Table, err)
 	}
 
-	// Bypass destinations stay on main (nft set + fwmark for large presets like ir,
-	// or per-CIDR ip rules for small lists / no nft).
+	// Bypass destinations stay on main: endpoint + host /32s as ip rules
+	// (required for handshake/DNS), bulk nets via ipset/nft fwmark.
 	if err := e.applyExcludeBypass(bypass, endpointHost); err != nil {
 		return err
 	}
@@ -210,7 +210,7 @@ func (e *Engine) flushTable() error {
 
 func (e *Engine) flushRules() error {
 	e.flushReturnPath()
-	e.flushBypassNFT()
+	e.flushBypassMarkBackend()
 	e.flushBypassMarkRules()
 	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
 		rules, err := netlink.RuleList(family)
@@ -218,7 +218,9 @@ func (e *Engine) flushRules() error {
 			continue
 		}
 		for _, r := range rules {
-			if r.Priority == constants.RulePrefReturnPath || r.Priority == constants.RulePrefBypassMark {
+			if r.Priority == constants.RulePrefReturnPath ||
+				r.Priority == constants.RulePrefEndpoint ||
+				r.Priority == constants.RulePrefBypassMark {
 				_ = netlink.RuleDel(&r)
 			}
 			if r.Priority >= constants.RulePrefMin && r.Priority <= constants.RulePrefCatchAll {

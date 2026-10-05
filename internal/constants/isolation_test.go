@@ -26,6 +26,9 @@ func TestIsolationDoesNotCollideWithWgQuick(t *testing.T) {
 	if constants.RulePrefReturnPath >= constants.RulePrefMin || constants.RulePrefReturnPath >= constants.RulePrefCatchAll {
 		t.Fatalf("RulePrefReturnPath %d must outrank destination/catch-all prefs", constants.RulePrefReturnPath)
 	}
+	if constants.RulePrefEndpoint <= constants.RulePrefReturnPath || constants.RulePrefEndpoint >= constants.RulePrefMin {
+		t.Fatalf("RulePrefEndpoint %d must sit between return-path and RulePrefMin", constants.RulePrefEndpoint)
+	}
 	if constants.NFTTable == "" || constants.NFTTable == "filter" || constants.NFTTable == "mangle" {
 		t.Fatalf("NFTTable %q collides with builtin nftables tables", constants.NFTTable)
 	}
