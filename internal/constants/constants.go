@@ -4,19 +4,27 @@ import "time"
 
 const (
 	AppName    = "parsvpn"
-	Version    = "1.6.14"
+	Version    = "1.6.15"
 	IfaceName  = "pv-tun0"
 	RouteTable = 51920
 	// FwMark marks conntrack entries for inbound connections that arrived on a
 	// non-tunnel interface so their replies stay on the main table (exclude mode).
 	FwMark = 0x5192
+	// BypassFwMark marks packets whose destination is in the exclude-mode bypass
+	// set (large presets like ir) so a single fwmark→main rule replaces thousands
+	// of per-CIDR ip rules.
+	BypassFwMark = 0x5193
 	// NFTTable is the inet nftables table used for return-path CONNMARK rules.
 	NFTTable = "parsvpn"
+	// NFTBypassTable holds the exclude-mode destination bypass set + mark chains.
+	NFTBypassTable = "parsvpn_bypass"
 
 	// RulePrefReturnPath is the fwmark→main rule for return-path traffic.
 	// Must be lower (higher priority) than RulePrefCatchAll and outside the
 	// destination/bypass allocator band so it is never consumed by pref++.
 	RulePrefReturnPath = 13990
+	// RulePrefBypassMark is fwmark→main for exclude-mode nft/ipset bypass sets.
+	RulePrefBypassMark = 13995
 
 	// RulePrefMin/Max bound destination policy rules (include destinations and
 	// exclude-mode bypass CIDRs). Catch-all exclude rule uses RulePrefCatchAll.

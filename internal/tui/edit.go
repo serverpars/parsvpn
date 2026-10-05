@@ -241,8 +241,7 @@ func (m model) updateEditHostAdd(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) openEditSplit() (tea.Model, tea.Cmd) {
 	m.refreshSplitPresetList()
 	m.mode = modeEditSplit
-	m.err = ""
-	m.notice = ""
+	// Do not clear m.err / m.notice — editDoneMsg sets them and reopens this view.
 	return m, nil
 }
 

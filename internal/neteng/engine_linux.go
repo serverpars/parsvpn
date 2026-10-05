@@ -155,54 +155,10 @@ func (e *Engine) ApplyExcludeRoutes(bypass []string, endpointHost string) error 
 		return fmt.Errorf("default route table %d: %w", e.Table, err)
 	}
 
-	pref := constants.RulePrefMin
-	addBypass := func(cidr string) error {
-		_, dst, err := net.ParseCIDR(cidr)
-		if err != nil {
-			ip := net.ParseIP(cidr)
-			if ip == nil {
-				return fmt.Errorf("bad bypass cidr %s: %w", cidr, err)
-			}
-			if v4 := ip.To4(); v4 != nil {
-				dst = &net.IPNet{IP: v4, Mask: net.CIDRMask(32, 32)}
-			} else {
-				dst = &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}
-			}
-		}
-		rule := netlink.NewRule()
-		rule.Family = familyOf(dst)
-		rule.Table = unix.RT_TABLE_MAIN
-		rule.Priority = pref
-		rule.Dst = dst
-		if err := netlink.RuleAdd(rule); err != nil {
-			return fmt.Errorf("bypass rule %s: %w", cidr, err)
-		}
-		pref++
-		if pref > constants.RulePrefMax {
-			return fmt.Errorf("too many bypass CIDRs (max %d)", constants.RulePrefMax-constants.RulePrefMin+1)
-		}
-		return nil
-	}
-
-	// Always keep the WireGuard endpoint on the main table (avoid tunnel loops).
-	if endpointHost != "" {
-		if ip := net.ParseIP(endpointHost); ip != nil {
-			if v4 := ip.To4(); v4 != nil {
-				if err := addBypass(v4.String() + "/32"); err != nil {
-					return err
-				}
-			} else {
-				if err := addBypass(ip.String() + "/128"); err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	for _, cidr := range bypass {
-		if err := addBypass(cidr); err != nil {
-			return err
-		}
+	// Bypass destinations stay on main (nft set + fwmark for large presets like ir,
+	// or per-CIDR ip rules for small lists / no nft).
+	if err := e.applyExcludeBypass(bypass, endpointHost); err != nil {
+		return err
 	}
 
 	// Catch-all: remaining traffic looks up the tunnel table.
@@ -254,13 +210,15 @@ func (e *Engine) flushTable() error {
 
 func (e *Engine) flushRules() error {
 	e.flushReturnPath()
+	e.flushBypassNFT()
+	e.flushBypassMarkRules()
 	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
 		rules, err := netlink.RuleList(family)
 		if err != nil {
 			continue
 		}
 		for _, r := range rules {
-			if r.Priority == constants.RulePrefReturnPath {
+			if r.Priority == constants.RulePrefReturnPath || r.Priority == constants.RulePrefBypassMark {
 				_ = netlink.RuleDel(&r)
 			}
 			if r.Priority >= constants.RulePrefMin && r.Priority <= constants.RulePrefCatchAll {
@@ -269,7 +227,7 @@ func (e *Engine) flushRules() error {
 			if r.Table == e.Table {
 				_ = netlink.RuleDel(&r)
 			}
-			if r.Mark == constants.FwMark {
+			if r.Mark == constants.FwMark || r.Mark == constants.BypassFwMark {
 				_ = netlink.RuleDel(&r)
 			}
 		}
