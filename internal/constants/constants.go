@@ -4,19 +4,18 @@ import "time"
 
 const (
 	AppName    = "parsvpn"
-	Version    = "1.6.18"
+	Version    = "1.6.19"
 	IfaceName  = "pv-tun0"
 	RouteTable = 51920
 	// FwMark marks conntrack entries for inbound connections that arrived on a
 	// non-tunnel interface so their replies stay on the main table (exclude mode).
 	FwMark = 0x5192
-	// BypassFwMark marks packets whose destination is in the exclude-mode bypass
-	// set (large presets like ir) so a single fwmark→main rule replaces thousands
-	// of per-CIDR ip rules.
+	// BypassFwMark was used by older exclude-mode ipset/nft mark bypass. Kept so
+	// flush still removes leftover fwmark→main rules after upgrades.
 	BypassFwMark = 0x5193
 	// NFTTable is the inet nftables table used for return-path CONNMARK rules.
 	NFTTable = "parsvpn"
-	// NFTBypassTable holds the exclude-mode destination bypass set + mark chains.
+	// NFTBypassTable is the legacy exclude-mode bypass mark table name (flushed on reload).
 	NFTBypassTable = "parsvpn_bypass"
 
 	// RulePrefReturnPath is the fwmark→main rule for return-path traffic.
@@ -27,7 +26,7 @@ const (
 	// endpoint. Must not depend on fwmark/nft: if handshake packets follow the
 	// catch-all into the tunnel, the tunnel can never come up.
 	RulePrefEndpoint = 13991
-	// RulePrefBypassMark is fwmark→main for exclude-mode nft/ipset bypass sets.
+	// RulePrefBypassMark is the legacy fwmark→main pref for exclude-mode mark sets.
 	RulePrefBypassMark = 13995
 
 	// RulePrefMin/Max bound destination policy rules (include destinations and

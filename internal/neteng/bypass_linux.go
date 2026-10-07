@@ -3,12 +3,8 @@
 package neteng
 
 import (
-	"bytes"
-	"context"
-	"errors"
 	"fmt"
 	"net"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -18,8 +14,10 @@ import (
 )
 
 // Large bypass lists (Iran ~2k CIDRs) must not fall back to per-CIDR ip rules —
-// that hangs reload/TUI for minutes. Prefer ipset+iptables or nft; error clearly
-// when both fail.
+// that hangs reload/TUI for minutes. Install exception routes in the tunnel
+// table instead (via the main default gateway). fwmark/ipset marking is kept
+// only as cleanup for older installs: on iptables-nft (RHEL8+) MARK often sets
+// the mark without re-routing, so Iran traffic still exits via pv-tun0.
 const bypassSlowFallbackMax = 64
 
 const (
@@ -49,9 +47,8 @@ func (e *Engine) applyExcludeBypass(bypass []string, endpointHost string) error 
 		}
 	}
 
-	// Endpoint MUST be a destination ip rule. nft/ipset fwmark marking is not
-	// reliable on all kernels (RHEL8 type-route marks often never land), and
-	// without this, handshake UDP loops into pv-tun0 → handshake never.
+	// Endpoint MUST be a destination ip rule. fwmark marking is not reliable on
+	// all kernels, and without this, handshake UDP loops into pv-tun0.
 	if endpoint != "" {
 		add(endpoint, true)
 	}
@@ -81,65 +78,68 @@ func (e *Engine) applyExcludeBypass(bypass []string, endpointHost string) error 
 		return nil
 	}
 
-	// Bulk nets (IR preset): mark path via ipset+iptables (preferred) or nft.
-	// Include hosts in the set too so mark path covers everything when it works.
-	bulk := append(append([]string{}, hosts...), nets...)
-	if err := e.applyBulkBypassMark(bulk); err != nil {
+	// Bulk nets (IR preset): exception routes inside the tunnel table so the
+	// catch-all rule still matches, but FIB sends those prefixes out the LAN
+	// next-hop. No mark re-route required.
+	if err := e.applyBypassExceptionRoutes(nets); err != nil {
 		if len(nets) > bypassSlowFallbackMax {
-			return fmt.Errorf("bypass mark set failed (%w); not falling back to %d ip rules", err, len(nets))
+			return fmt.Errorf("bypass exception routes failed (%w); not falling back to %d ip rules", err, len(nets))
 		}
-		e.flushBypassMarkBackend()
 		return e.applyBypassRulesFrom(nets, constants.RulePrefMin+len(hostRules))
 	}
 	return nil
 }
 
-func (e *Engine) applyBulkBypassMark(cidrs []string) error {
+// applyBypassExceptionRoutes installs more-specific routes in the tunnel table
+// that exit via the main IPv4 default gateway/device. Traffic still hits the
+// exclude catch-all (lookup table 51920), but IR prefixes bypass pv-tun0.
+func (e *Engine) applyBypassExceptionRoutes(cidrs []string) error {
 	elems := normalizeBypassV4Elements(cidrs)
 	if len(elems) == 0 {
-		return fmt.Errorf("bypass mark set: no IPv4 CIDRs to install")
+		return fmt.Errorf("bypass exception routes: no IPv4 CIDRs to install")
 	}
-
-	var lastErr error
-	if hasBin("ipset") && hasBin("iptables") {
-		if err := e.applyBypassIPSet(elems); err == nil {
-			return e.applyBypassMarkRule()
-		} else {
-			lastErr = err
-			e.flushBypassIPSet()
+	gw, linkIndex, err := e.mainIPv4Default()
+	if err != nil {
+		return err
+	}
+	for _, c := range elems {
+		_, dst, err := net.ParseCIDR(c)
+		if err != nil {
+			continue
 		}
-	}
-	if hasBin("nft") {
-		if err := e.applyBypassNFT(elems); err == nil {
-			return e.applyBypassMarkRule()
-		} else {
-			lastErr = err
-			e.flushBypassNFT()
+		route := &netlink.Route{
+			LinkIndex: linkIndex,
+			Dst:       dst,
+			Gw:        gw,
+			Table:     e.Table,
 		}
-	}
-	if lastErr != nil {
-		return lastErr
-	}
-	return fmt.Errorf("nft or ipset+iptables required for large bypass presets (%d CIDRs)", len(elems))
-}
-
-func hasBin(name string) bool {
-	_, err := exec.LookPath(name)
-	return err == nil
-}
-
-func (e *Engine) applyBypassMarkRule() error {
-	mask := uint32(0xffffffff)
-	rule := netlink.NewRule()
-	rule.Family = netlink.FAMILY_V4
-	rule.Table = unix.RT_TABLE_MAIN
-	rule.Priority = constants.RulePrefBypassMark
-	rule.Mark = constants.BypassFwMark
-	rule.Mask = &mask
-	if err := netlink.RuleAdd(rule); err != nil {
-		return fmt.Errorf("bypass fwmark rule: %w", err)
+		if err := netlink.RouteReplace(route); err != nil {
+			return fmt.Errorf("bypass exception route %s: %w", c, err)
+		}
 	}
 	return nil
+}
+
+// mainIPv4Default returns the current unmarked IPv4 egress (gateway + device).
+// Called while installing exclude routes, after flushRules and before the
+// catch-all tunnel rule, so RouteGet still reflects the LAN default.
+// The gateway may be nil for on-link defaults.
+func (e *Engine) mainIPv4Default() (gw net.IP, linkIndex int, err error) {
+	routes, err := netlink.RouteGet(net.IPv4(1, 1, 1, 1))
+	if err != nil {
+		return nil, 0, fmt.Errorf("route get 1.1.1.1: %w", err)
+	}
+	if len(routes) == 0 {
+		return nil, 0, fmt.Errorf("no route to 1.1.1.1")
+	}
+	r := routes[0]
+	if r.LinkIndex == 0 {
+		return nil, 0, fmt.Errorf("no egress device for default route")
+	}
+	if link, lerr := netlink.LinkByName(e.Iface); lerr == nil && r.LinkIndex == link.Attrs().Index {
+		return nil, 0, fmt.Errorf("default path goes via tunnel interface %s", e.Iface)
+	}
+	return r.Gw, r.LinkIndex, nil
 }
 
 func (e *Engine) applyBypassRules(cidrs []string) error {
@@ -153,7 +153,7 @@ func (e *Engine) applyBypassRulesFrom(cidrs []string, pref int) error {
 		}
 		pref++
 		if pref > constants.RulePrefMax {
-			return fmt.Errorf("too many bypass CIDRs (max %d); install nft/ipset for large presets like ir", constants.RulePrefMax-constants.RulePrefMin+1)
+			return fmt.Errorf("too many bypass CIDRs (max %d); exception routes should be used for large presets like ir", constants.RulePrefMax-constants.RulePrefMin+1)
 		}
 	}
 	return nil
@@ -188,108 +188,6 @@ func parseBypassDst(cidr string) (*net.IPNet, error) {
 		return &net.IPNet{IP: v4, Mask: net.CIDRMask(32, 32)}, nil
 	}
 	return &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}, nil
-}
-
-func (e *Engine) applyBypassIPSet(elems []string) error {
-	e.flushBypassIPSet()
-
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("create %s hash:net family inet maxelem 65536\n", bypassIPSetName))
-	for _, c := range elems {
-		b.WriteString("add ")
-		b.WriteString(bypassIPSetName)
-		b.WriteByte(' ')
-		b.WriteString(c)
-		b.WriteByte('\n')
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "ipset", "restore", "-exist")
-	cmd.Stdin = strings.NewReader(b.String())
-	setKillProcessGroup(cmd)
-	out, err := cmd.CombinedOutput()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("ipset restore: timed out")
-	}
-	if err != nil {
-		return fmt.Errorf("ipset restore: %w (%s)", err, bytes.TrimSpace(out))
-	}
-
-	// iptables mangle MARK is the reliable route_me_harder path on RHEL/CentOS.
-	_ = runTimed(5*time.Second, "iptables", "-t", "mangle", "-N", bypassIPTablesChain)
-	if err := runTimed(5*time.Second, "iptables", "-t", "mangle", "-F", bypassIPTablesChain); err != nil {
-		return fmt.Errorf("iptables flush %s: %w", bypassIPTablesChain, err)
-	}
-	mark := fmt.Sprintf("0x%x/0xffffffff", constants.BypassFwMark)
-	if err := runTimed(5*time.Second, "iptables", "-t", "mangle", "-A", bypassIPTablesChain,
-		"-m", "set", "--match-set", bypassIPSetName, "dst",
-		"-j", "MARK", "--set-xmark", mark); err != nil {
-		return fmt.Errorf("iptables mark rule: %w", err)
-	}
-	for _, hook := range []string{"OUTPUT", "PREROUTING"} {
-		if err := ensureMangleJump(hook); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func ensureMangleJump(hook string) error {
-	// Already present?
-	if runTimed(3*time.Second, "iptables", "-t", "mangle", "-C", hook, "-j", bypassIPTablesChain) == nil {
-		return nil
-	}
-	if err := runTimed(5*time.Second, "iptables", "-t", "mangle", "-A", hook, "-j", bypassIPTablesChain); err != nil {
-		return fmt.Errorf("iptables jump %s: %w", hook, err)
-	}
-	return nil
-}
-
-func (e *Engine) applyBypassNFT(elems []string) error {
-	e.flushBypassNFT()
-	if len(elems) == 0 {
-		return fmt.Errorf("bypass nft: no IPv4 CIDRs to install")
-	}
-
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("table inet %s {\n", constants.NFTBypassTable))
-	// auto-merge is required: country lists often contain overlapping prefixes,
-	// and nft rejects interval sets without it.
-	b.WriteString("\tset nets {\n\t\ttype ipv4_addr\n\t\tflags interval\n\t\tauto-merge\n\t\telements = {\n")
-	for i, c := range elems {
-		if i > 0 {
-			b.WriteString(",\n")
-		}
-		b.WriteString("\t\t\t")
-		b.WriteString(c)
-	}
-	b.WriteString("\n\t\t}\n\t}\n")
-	mark := constants.BypassFwMark
-	b.WriteString(fmt.Sprintf(`	chain output {
-		type route hook output priority -160; policy accept;
-		ip daddr @nets meta mark set 0x%x
-	}
-	chain prerouting {
-		type filter hook prerouting priority -160; policy accept;
-		ip daddr @nets meta mark set 0x%x
-	}
-}
-`, mark, mark))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "nft", "-f", "-")
-	cmd.Stdin = strings.NewReader(b.String())
-	setKillProcessGroup(cmd)
-	out, err := cmd.CombinedOutput()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("nft bypass: timed out")
-	}
-	if err != nil {
-		return fmt.Errorf("nft bypass: %w (%s)", err, bytes.TrimSpace(out))
-	}
-	return nil
 }
 
 func endpointHostCIDR(host string) string {

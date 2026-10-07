@@ -9,8 +9,8 @@ import (
 	"github.com/serverpars/parsvpn/internal/constants"
 )
 
-func TestBypassNFTScriptShape(t *testing.T) {
-	// Sanity: table name and mark are distinct from return-path.
+func TestBypassPrefOrdering(t *testing.T) {
+	// Legacy bypass-mark prefs must stay ordered so flush still finds old rules.
 	if constants.NFTBypassTable == constants.NFTTable {
 		t.Fatal("bypass nft table must differ from return-path table")
 	}
