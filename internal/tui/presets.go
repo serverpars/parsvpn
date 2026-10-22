@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/serverpars/parsvpn/internal/preset"
+	"github.com/serverpars/parsvpn/internal/profile"
 )
 
 type presetListItem struct {
@@ -286,7 +287,11 @@ func presetAddEntry(name, entry string) tea.Cmd {
 		if err := preset.Save(p); err != nil {
 			return presetDoneMsg{err: fmt.Errorf("save: %w (try running as root)", err), reopen: "entries"}
 		}
-		return presetDoneMsg{message: "added " + entry, reopen: "entries", name: name}
+		applied, err := profile.ReloadIfActiveUsesPreset(name)
+		if err != nil {
+			return presetDoneMsg{err: err, reopen: "entries", name: name}
+		}
+		return presetDoneMsg{message: "added " + entry + presetApplyNote(applied), reopen: "entries", name: name}
 	}
 }
 
@@ -302,12 +307,26 @@ func presetRemoveEntry(name, entry string) tea.Cmd {
 		if err := preset.Save(p); err != nil {
 			return presetDoneMsg{err: fmt.Errorf("save: %w (try running as root)", err), reopen: "entries"}
 		}
-		return presetDoneMsg{message: "removed " + entry, reopen: "entries", name: name}
+		applied, err := profile.ReloadIfActiveUsesPreset(name)
+		if err != nil {
+			return presetDoneMsg{err: err, reopen: "entries", name: name}
+		}
+		return presetDoneMsg{message: "removed " + entry + presetApplyNote(applied), reopen: "entries", name: name}
 	}
+}
+
+func presetApplyNote(applied bool) string {
+	if applied {
+		return " — applied to active tunnel"
+	}
+	return ""
 }
 
 func presetDelete(name string) tea.Cmd {
 	return func() tea.Msg {
+		if users := profile.ProfilesUsingPreset(name); len(users) > 0 {
+			return presetDoneMsg{err: fmt.Errorf("preset %q is used by %s — switch them to another preset first", name, strings.Join(users, ", ")), reopen: "list"}
+		}
 		if err := preset.Delete(name); err != nil {
 			return presetDoneMsg{err: fmt.Errorf("delete: %w (try running as root)", err), reopen: "list"}
 		}
@@ -318,29 +337,17 @@ func presetDelete(name string) tea.Cmd {
 func (m model) viewPresets() string {
 	header := titleStyle.Render("Bypass presets")
 	hint := "Builtins: ir, none. Custom presets apply via Edit → Split on a profile.\nCLI: parsvpn preset list|show|new|add|rm|delete"
-	var errLine string
-	if m.err != "" {
-		errLine = "\nError: " + m.err + "\n"
-	}
-	if m.notice != "" {
-		errLine += "\n" + m.notice + "\n"
-	}
-	help := helpStyle.Render("[enter] Open  [a] New  [d] Delete custom  [esc] Back")
+	errLine := m.messages()
+	help := m.help("[enter] Open  [a] New  [d] Delete custom  [esc] Back")
 	return header + "\n" + hint + "\n\n" + m.editList.View() + errLine + "\n" + help
 }
 
 func (m model) viewPresetEntries() string {
 	header := titleStyle.Render(m.editList.Title)
-	var errLine string
-	if m.err != "" {
-		errLine = "\nError: " + m.err + "\n"
-	}
-	if m.notice != "" {
-		errLine += "\n" + m.notice + "\n"
-	}
-	help := helpStyle.Render("[a] Add entry  [d] Remove  [esc] Back")
+	errLine := m.messages()
+	help := m.help("[a] Add entry  [d] Remove  [esc] Back")
 	if m.presetName == "ir" || m.presetName == "none" {
-		help = helpStyle.Render("[esc] Back")
+		help = m.help("[esc] Back")
 	}
 	return header + "\n\n" + m.editList.View() + errLine + "\n" + help
 }
@@ -348,11 +355,8 @@ func (m model) viewPresetEntries() string {
 func (m model) viewPresetNew() string {
 	header := titleStyle.Render("New custom preset")
 	body := promptStyle.Render("name:") + "\n" + m.nameInput.View()
-	var errLine string
-	if m.err != "" {
-		errLine = "\nError: " + m.err + "\n"
-	}
-	help := helpStyle.Render("[enter] Create  [esc] Back")
+	errLine := m.messages()
+	help := m.help("[enter] Create  [esc] Back")
 	return header + "\n\n" + body + errLine + "\n\n" + help
 }
 
@@ -360,17 +364,14 @@ func (m model) viewPresetAddEntry() string {
 	header := titleStyle.Render(fmt.Sprintf("Add to preset — %s", m.presetName))
 	body := "IP, CIDR, hostname, or *.wildcard.com\n\n" +
 		promptStyle.Render("entry:") + "\n" + m.nameInput.View()
-	var errLine string
-	if m.err != "" {
-		errLine = "\nError: " + m.err + "\n"
-	}
-	help := helpStyle.Render("[enter] Add  [esc] Back")
+	errLine := m.messages()
+	help := m.help("[enter] Add  [esc] Back")
 	return header + "\n\n" + body + errLine + "\n\n" + help
 }
 
 func (m model) viewPresetConfirmDelete() string {
 	header := titleStyle.Render("Delete preset")
 	body := fmt.Sprintf("Delete custom preset %q?\nThis cannot be undone.", m.presetName)
-	help := helpStyle.Render("[y] Yes  [n] No")
+	help := m.help("[y] Yes  [n] No")
 	return header + "\n\n" + body + "\n\n" + help
 }

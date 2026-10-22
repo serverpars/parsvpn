@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/serverpars/parsvpn/internal/constants"
+	"github.com/serverpars/parsvpn/internal/dnseng"
 	"github.com/serverpars/parsvpn/internal/ipc"
 	"github.com/serverpars/parsvpn/internal/neteng"
 )
@@ -55,6 +56,12 @@ func Run(opts Options) error {
 	eng := neteng.New()
 	_ = eng.CleanupOrphans()
 	_ = eng.Teardown()
+
+	// If the daemon was dead, nothing restored resolv.conf; do it before the
+	// backup is deleted with the runtime / config directories.
+	if err := dnseng.RecoverResolvConf(); err != nil {
+		fmt.Println("warning: could not restore /etc/resolv.conf:", err)
+	}
 
 	unit := "/etc/systemd/system/" + constants.ServiceName + ".service"
 	_ = os.Remove(unit)

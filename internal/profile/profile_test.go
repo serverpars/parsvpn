@@ -524,3 +524,157 @@ func TestImportFileJSON(t *testing.T) {
 		t.Fatalf("split: %#v", p.SplitTunnel.IPRanges)
 	}
 }
+
+func TestUpstreamDNSHostPrefersIPv4(t *testing.T) {
+	p := &Profile{DNS: []string{"2606:4700:4700::1111", "1.0.0.1"}}
+	if got := p.UpstreamDNSHost(); got != "1.0.0.1" {
+		t.Fatalf("upstream: %s", got)
+	}
+	p.DNS = []string{"2606:4700:4700::1111"}
+	if got := p.UpstreamDNSHost(); got != "2606:4700:4700::1111" {
+		t.Fatalf("v6-only upstream: %s", got)
+	}
+}
+
+func TestSetSplitModeIncludeWithIPv6DNS(t *testing.T) {
+	p := &Profile{
+		Name:       "v6dns",
+		PrivateKey: "xKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
+		DNS:        []string{"2606:4700:4700::1111", "1.1.1.1"},
+		SplitTunnel: SplitTunnel{
+			Mode: SplitModeExclude,
+		},
+	}
+	if err := p.SetSplitMode(SplitModeInclude); err != nil {
+		t.Fatalf("include with IPv6 DNS server: %v", err)
+	}
+	if len(p.SplitTunnel.IPRanges) != 1 || p.SplitTunnel.IPRanges[0] != "1.1.1.1/32" {
+		t.Fatalf("ranges: %#v", p.SplitTunnel.IPRanges)
+	}
+}
+
+func TestPinHostExcludeModeDoesNotBypass(t *testing.T) {
+	p := &Profile{
+		Name:       "ex",
+		PrivateKey: "xKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
+		SplitTunnel: SplitTunnel{
+			Mode:     SplitModeExclude,
+			IPRanges: []string{"192.168.0.0/16"},
+		},
+	}
+	if err := p.PinHost("example.com", "93.184.216.34"); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.SplitTunnel.IPRanges) != 1 {
+		t.Fatalf("pin must not add an exclude-mode bypass: %#v", p.SplitTunnel.IPRanges)
+	}
+	if len(p.SplitTunnel.HostOverrides) != 1 {
+		t.Fatalf("overrides: %#v", p.SplitTunnel.HostOverrides)
+	}
+}
+
+func TestUnpinHostKeepsSharedRoute(t *testing.T) {
+	p := &Profile{
+		Name:       "www",
+		PrivateKey: "xKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
+	}
+	if err := p.PinHostWith("example.com", "93.184.216.34", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.UnpinHost("example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.SplitTunnel.IPRanges) != 1 {
+		t.Fatalf("www pin still needs the route: %#v", p.SplitTunnel.IPRanges)
+	}
+	if err := p.UnpinHost("www.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.SplitTunnel.IPRanges) != 0 {
+		t.Fatalf("route should go with the last pin: %#v", p.SplitTunnel.IPRanges)
+	}
+}
+
+func TestNormalizeToleratesMissingPreset(t *testing.T) {
+	p := &Profile{
+		Name:       "orphan",
+		PrivateKey: "xKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
+		SplitTunnel: SplitTunnel{
+			BypassPreset: "deleted-preset-does-not-exist",
+		},
+	}
+	if err := p.Normalize(); err != nil {
+		t.Fatalf("profile with deleted preset must still load: %v", err)
+	}
+	if err := p.SetBypassPreset("none"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestImportPrefersIPv4AndDropsSearchDomains(t *testing.T) {
+	content := `[Interface]
+PrivateKey = xKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=
+Address = fd00::2/128, 10.200.0.2/32
+DNS = corp.example, 10.10.0.53
+
+[Peer]
+PublicKey = bmaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=
+Endpoint = 198.51.100.25:51820
+AllowedIPs = 10.10.0.0/16
+`
+	p, err := ImportWireGuardConfContent(content, "dual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Address != "10.200.0.2/32" {
+		t.Fatalf("address: %s", p.Address)
+	}
+	if len(p.DNS) != 1 || p.DNS[0] != "10.10.0.53" {
+		t.Fatalf("dns: %#v", p.DNS)
+	}
+}
+
+func TestImportFileExplicitNameOverridesJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.json")
+	data := `{"name":"inner","private_key":"xKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","address":"10.0.0.2/32","peers":[{"public_key":"bmaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=","allowed_ips":["10.0.0.0/24"]}]}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := ImportFile(path, "office")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name != "office" {
+		t.Fatalf("name: %s", p.Name)
+	}
+	p, err = ImportFile(path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name != "inner" {
+		t.Fatalf("default name should come from JSON: %s", p.Name)
+	}
+}
+
+func TestDynamicWildcardPin(t *testing.T) {
+	p := &Profile{Name: "dyn", PrivateKey: "xKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa="}
+	if err := p.PinHostWith("*.github.com", "", true); err != nil {
+		t.Fatal(err)
+	}
+	if !p.HasDynamicOverrides() || len(p.SplitTunnel.HostOverrides) != 1 {
+		t.Fatalf("overrides: %#v", p.SplitTunnel.HostOverrides)
+	}
+	if err := p.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.SplitTunnel.IPRanges) != 0 {
+		t.Fatalf("dynamic pin must not add a static route: %#v", p.SplitTunnel.IPRanges)
+	}
+	if err := p.PinHostWith("example.com", "", false); err == nil {
+		t.Fatal("exact domain without IP must be rejected")
+	}
+	if got := RoutingDomainForOverride("example.com"); got != "~example.com" {
+		t.Fatalf("exact pins must be routing-only domains, got %s", got)
+	}
+}

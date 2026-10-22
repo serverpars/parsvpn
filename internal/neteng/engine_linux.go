@@ -3,6 +3,7 @@
 package neteng
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -173,6 +174,59 @@ func (e *Engine) ApplyExcludeRoutes(bypass []string, endpointHost string) error 
 	// Return-path: mark inbound !pv-tun0 connections and route their replies via main.
 	if err := e.applyReturnPath(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// AddHostRoutes routes each IPv4 address via pv-tun0 in table 51920 (answers
+// for dynamic wildcard pins). In exclude mode the catch-all rule already looks
+// up the table and a /32 beats any bypass exception route; include mode also
+// needs EnsureTableLookupRule.
+func (e *Engine) AddHostRoutes(ips []net.IP) error {
+	link, err := netlink.LinkByName(e.Iface)
+	if err != nil {
+		return err
+	}
+	for _, ip := range ips {
+		v4 := ip.To4()
+		if v4 == nil {
+			continue
+		}
+		if err := netlink.RouteReplace(&netlink.Route{
+			LinkIndex: link.Attrs().Index,
+			Dst:       &net.IPNet{IP: v4, Mask: net.CIDRMask(32, 32)},
+			Table:     e.Table,
+			Scope:     netlink.SCOPE_LINK,
+		}); err != nil {
+			return fmt.Errorf("host route %s: %w", v4, err)
+		}
+	}
+	return nil
+}
+
+// DelHostRoutes removes routes added by AddHostRoutes.
+func (e *Engine) DelHostRoutes(ips []net.IP) {
+	for _, ip := range ips {
+		if v4 := ip.To4(); v4 != nil {
+			_ = netlink.RouteDel(&netlink.Route{
+				Dst:   &net.IPNet{IP: v4, Mask: net.CIDRMask(32, 32)},
+				Table: e.Table,
+			})
+		}
+	}
+}
+
+// EnsureTableLookupRule adds a plain "lookup 51920" rule at RulePrefCatchAll
+// for include mode, so AddHostRoutes /32s are used without one rule per IP.
+// The include table has no default route, so any destination without a route
+// there falls through to the following rules (main) unchanged.
+func (e *Engine) EnsureTableLookupRule() error {
+	rule := netlink.NewRule()
+	rule.Family = netlink.FAMILY_V4
+	rule.Table = e.Table
+	rule.Priority = constants.RulePrefCatchAll
+	if err := netlink.RuleAdd(rule); err != nil && !errors.Is(err, unix.EEXIST) {
+		return fmt.Errorf("table lookup rule: %w", err)
 	}
 	return nil
 }

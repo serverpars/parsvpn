@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -62,11 +63,9 @@ func ImportWireGuardConfReader(r io.Reader, name string) (*Profile, error) {
 			case "privatekey":
 				p.PrivateKey = val
 			case "address":
-				// wg-quick allows comma-separated; take first for tunnel address.
-				parts := splitCSV(val)
-				if len(parts) > 0 {
-					p.Address = parts[0]
-				}
+				// wg-quick allows comma-separated; only one address is assigned,
+				// so prefer IPv4 (routing and exclude mode are IPv4).
+				p.Address = preferIPv4Address(splitCSV(val))
 			case "listenport":
 				n, err := strconv.Atoi(val)
 				if err != nil {
@@ -74,7 +73,14 @@ func ImportWireGuardConfReader(r io.Reader, name string) (*Profile, error) {
 				}
 				p.ListenPort = n
 			case "dns":
-				p.DNS = splitCSV(val)
+				// wg-quick treats non-IP DNS= entries as search domains; keep
+				// only resolver IPs.
+				p.DNS = nil
+				for _, d := range splitCSV(val) {
+					if net.ParseIP(d) != nil {
+						p.DNS = append(p.DNS, d)
+					}
+				}
 				// Match wg-quick: a DNS= line means push resolvers while the tunnel is up.
 				if len(p.DNS) > 0 {
 					p.OverrideSystemDNS = true
@@ -118,6 +124,23 @@ func ImportWireGuardConfReader(r io.Reader, name string) (*Profile, error) {
 		return nil, err
 	}
 	return p, nil
+}
+
+// preferIPv4Address returns the first IPv4 address/CIDR, else the first entry.
+func preferIPv4Address(addrs []string) string {
+	for _, a := range addrs {
+		host := a
+		if ip, _, err := net.ParseCIDR(a); err == nil {
+			host = ip.String()
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.To4() != nil {
+			return a
+		}
+	}
+	if len(addrs) > 0 {
+		return addrs[0]
+	}
+	return ""
 }
 
 func splitCSV(s string) []string {

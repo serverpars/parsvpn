@@ -136,21 +136,23 @@ Send all of the machine's DNS through the tunnel while connected — useful for 
 ```bash
 parsvpn dns show office
 sudo parsvpn dns override office on            # upstream defaults to 1.1.1.1
-sudo parsvpn dns set office 1.1.1.1 8.8.8.8    # custom upstream (also enables override)
+sudo parsvpn dns set office 1.1.1.1 8.8.8.8    # tunnel DNS servers (override setting unchanged)
 sudo parsvpn dns override office off
 ```
 
-Importing a `.conf` that contains `DNS=` turns this on automatically. ParsVPN uses `systemd-resolved` when present, and otherwise manages `/etc/resolv.conf` with a backup that is restored on disconnect.
+Importing a `.conf` that contains `DNS=` turns this on automatically. ParsVPN uses `systemd-resolved` when present, and otherwise manages `/etc/resolv.conf` with a backup (in `/etc/parsvpn/`) that is restored on disconnect, and after a crash or power loss.
+
+With override **off**, system DNS is left alone: only pinned hosts are answered by ParsVPN, and every other lookup still goes to your normal resolvers. The tunnel DNS servers are then used only to resolve pinned hosts.
 
 ### Host pins
 
-Resolve a domain through the tunnel's DNS, pin the answer, and route that IP through the VPN.
+Send specific hosts through the VPN. An exact domain is resolved through the tunnel's DNS, pinned, and its IP routed. A wildcard is dynamic: each subdomain is resolved through the tunnel DNS when it is looked up, and **its own** IP is routed — no shared address.
 
 ```bash
 parsvpn host list office
 sudo parsvpn host add office example.com              # resolve, pin + route
 sudo parsvpn host add office example.com --www        # also pin www.example.com
-sudo parsvpn host add office '*.github.com'           # all subdomains → same IP
+sudo parsvpn host add office '*.github.com'           # each subdomain → its own IP, routed
 sudo parsvpn host add office db.internal 10.10.0.50   # explicit IP
 sudo parsvpn host rm  office example.com
 ```

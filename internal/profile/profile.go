@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/serverpars/parsvpn/internal/constants"
+	"github.com/serverpars/parsvpn/internal/ipc"
 	"github.com/serverpars/parsvpn/internal/preset"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
@@ -22,9 +23,26 @@ const (
 )
 
 // HostOverride maps a domain to a fixed IPv4/IPv6 address for the embedded DNS proxy.
+// A wildcard (*.example.com) with an empty IP is dynamic: each subdomain is
+// resolved through the tunnel DNS and its own answer IP is routed.
 type HostOverride struct {
 	Domain string `json:"domain"`
 	IP     string `json:"ip"`
+}
+
+// IsDynamicOverride reports whether o is a dynamic wildcard pin.
+func IsDynamicOverride(o HostOverride) bool {
+	return strings.HasPrefix(strings.TrimSpace(o.Domain), "*.") && strings.TrimSpace(o.IP) == ""
+}
+
+// HasDynamicOverrides reports whether any host pin is a dynamic wildcard.
+func (p *Profile) HasDynamicOverrides() bool {
+	for _, o := range p.SplitTunnel.HostOverrides {
+		if IsDynamicOverride(o) {
+			return true
+		}
+	}
+	return false
 }
 
 // SplitTunnel holds destination CIDRs and DNS host overrides.
@@ -57,7 +75,7 @@ type Profile struct {
 	// DNS is the upstream resolver list (used by the embedded proxy / host pin).
 	DNS []string `json:"dns,omitempty"`
 	// OverrideSystemDNS routes all system DNS via the embedded proxy while the
-	// tunnel is up (avoids ISP filtering). Upstream is DNS[0] or 1.1.1.1.
+	// tunnel is up (avoids ISP filtering). Upstream is UpstreamDNSHost().
 	OverrideSystemDNS bool `json:"override_system_dns,omitempty"`
 	MTU               int  `json:"mtu,omitempty"`
 	Peers             []Peer      `json:"peers"`
@@ -100,6 +118,9 @@ func Save(p *Profile) error {
 	}
 	if err := p.Normalize(); err != nil {
 		return err
+	}
+	if bp := p.SplitTunnel.BypassPreset; bp != "" && !preset.Exists(bp) {
+		return fmt.Errorf("profile %q: unknown bypass preset %q (set another with: parsvpn split preset %s none)", p.Name, bp, p.Name)
 	}
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
@@ -208,9 +229,8 @@ func (p *Profile) Normalize() error {
 	}
 	p.SplitTunnel.BypassPreset = bypassPreset
 	if bypassPreset != "" {
-		if !preset.Exists(bypassPreset) {
-			return fmt.Errorf("profile %q: unknown bypass preset %q", p.Name, bypassPreset)
-		}
+		// Existence is checked on Save, not here: a profile whose custom preset
+		// was deleted must still load so it can be switched to another preset.
 		// Presets only apply in exclude mode — force it so named lists actually bypass.
 		p.SplitTunnel.Mode = SplitModeExclude
 		mode = SplitModeExclude
@@ -249,6 +269,9 @@ func (p *Profile) SyncHostOverrideRoutes() error {
 		return nil
 	}
 	for _, o := range p.SplitTunnel.HostOverrides {
+		if IsDynamicOverride(o) {
+			continue // routed per answer at runtime
+		}
 		if err := p.AddRoutes(o.IP); err != nil {
 			return fmt.Errorf("host override %s route: %w", o.Domain, err)
 		}
@@ -435,7 +458,10 @@ func (p *Profile) AddHostOverride(domain, ip string) error {
 		return err
 	}
 	ip = strings.TrimSpace(ip)
-	if net.ParseIP(ip) == nil {
+	if ip == "" && !strings.HasPrefix(domain, "*.") {
+		return fmt.Errorf("IP required for %q (only *.domain wildcards resolve dynamically)", domain)
+	}
+	if ip != "" && net.ParseIP(ip) == nil {
 		return fmt.Errorf("invalid IP %q", ip)
 	}
 	for i := range p.SplitTunnel.HostOverrides {
@@ -515,14 +541,17 @@ func WWWCompanion(domain string) (string, bool) {
 	return "www." + domain, true
 }
 
-// RoutingDomainForOverride returns the systemd-resolved routing domain for an override.
-// Wildcards use ~parent so all subdomain queries reach the embedded proxy.
+// RoutingDomainForOverride returns the systemd-resolved routing-only domain
+// for an override: ~parent for wildcards, ~name for exact pins. Routing-only
+// domains send just those lookups to the proxy; a bare domain would also become
+// a search suffix and change how short names resolve.
 func RoutingDomainForOverride(domain string) string {
 	domain = strings.TrimSpace(strings.ToLower(strings.TrimSuffix(domain, ".")))
-	if strings.HasPrefix(domain, "*.") {
-		return "~" + domain[2:]
+	domain = strings.TrimPrefix(domain, "*.")
+	if domain == "" {
+		return ""
 	}
-	return domain
+	return "~" + domain
 }
 
 // SetSplitMode sets include|exclude.
@@ -572,8 +601,10 @@ func (p *Profile) SetBypassPreset(name string) error {
 	return nil
 }
 
-// UpstreamDNSHost returns the first profile DNS server or Cloudflare 1.1.1.1.
+// UpstreamDNSHost returns the first IPv4 profile DNS server (resolver routes
+// and exclude-mode tunneling are IPv4), else the first IPv6 one, else 1.1.1.1.
 func (p *Profile) UpstreamDNSHost() string {
+	firstV6 := ""
 	for _, d := range p.DNS {
 		d = strings.TrimSpace(d)
 		if d == "" {
@@ -583,9 +614,19 @@ func (p *Profile) UpstreamDNSHost() string {
 		if h, _, err := net.SplitHostPort(d); err == nil {
 			host = h
 		}
-		if ip := net.ParseIP(host); ip != nil {
+		ip := net.ParseIP(host)
+		if ip == nil {
+			continue
+		}
+		if ip.To4() != nil {
 			return ip.String()
 		}
+		if firstV6 == "" {
+			firstV6 = ip.String()
+		}
+	}
+	if firstV6 != "" {
+		return firstV6
 	}
 	return "1.1.1.1"
 }
@@ -631,7 +672,9 @@ func (p *Profile) PinHost(domain, ipStr string) error {
 	return p.PinHostWith(domain, ipStr, false)
 }
 
-// PinHostWith pins domain→IP (and optionally www.<domain>) and adds one tunnel route.
+// PinHostWith pins domain→IP (and optionally www.<domain>) and, in include mode,
+// adds one tunnel route. In exclude mode ip_ranges are bypasses, so adding the
+// pinned IP there would send the host around the tunnel instead of through it.
 func (p *Profile) PinHostWith(domain, ipStr string, alsoWWW bool) error {
 	domain, err := NormalizeHostDomain(domain)
 	if err != nil {
@@ -639,6 +682,9 @@ func (p *Profile) PinHostWith(domain, ipStr string, alsoWWW bool) error {
 	}
 	if err := p.AddHostOverride(domain, ipStr); err != nil {
 		return err
+	}
+	if strings.TrimSpace(ipStr) == "" {
+		return nil // dynamic wildcard: routes are added per DNS answer
 	}
 	if alsoWWW {
 		if www, ok := WWWCompanion(domain); ok {
@@ -650,6 +696,9 @@ func (p *Profile) PinHostWith(domain, ipStr string, alsoWWW bool) error {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
 		return fmt.Errorf("invalid IP %q", ipStr)
+	}
+	if p.EffectiveMode() != SplitModeInclude {
+		return nil
 	}
 	cidr := ip.String() + "/32"
 	if ip.To4() == nil {
@@ -674,9 +723,16 @@ func (p *Profile) UnpinHost(domain string) error {
 	if err := p.RemoveHostOverride(domain); err != nil {
 		return err
 	}
-	if ipStr != "" {
-		_ = p.RemoveRoutes(ipStr)
+	if ipStr == "" {
+		return nil
 	}
+	// Keep the route while another pin (e.g. the --www companion) uses the IP.
+	for _, o := range p.SplitTunnel.HostOverrides {
+		if net.ParseIP(o.IP).Equal(net.ParseIP(ipStr)) {
+			return nil
+		}
+	}
+	_ = p.RemoveRoutes(ipStr)
 	return nil
 }
 
@@ -710,8 +766,9 @@ var wellKnownResolvers = []string{
 	"9.9.9.9", "149.112.112.112",
 }
 
-// EnsureDNSRoutes adds every configured DNS server (or the 1.1.1.1 fallback)
-// as include-mode /32 routes. No-op outside include mode.
+// EnsureDNSRoutes adds every configured IPv4 DNS server (or the 1.1.1.1
+// fallback) as include-mode /32 routes. IPv6 servers are skipped rather than
+// failing the caller (mode/preset switches). No-op outside include mode.
 func (p *Profile) EnsureDNSRoutes() error {
 	if p.EffectiveMode() != SplitModeInclude {
 		return nil
@@ -724,6 +781,9 @@ func (p *Profile) EnsureDNSRoutes() error {
 		host := s
 		if h, _, err := net.SplitHostPort(s); err == nil {
 			host = h
+		}
+		if ip := net.ParseIP(host); ip == nil || ip.To4() == nil {
+			continue
 		}
 		if _, err := p.EnsureResolverRouted(host); err != nil {
 			return err
@@ -865,4 +925,72 @@ func isResolverRoute(c string, extra ...string) bool {
 		}
 	}
 	return false
+}
+
+// EnsureNotActive refuses to proceed when name is the daemon's connected
+// profile: deleting it would leave a session that can no longer reload.
+// An unreachable daemon means nothing is connected.
+func EnsureNotActive(name string) error {
+	resp, err := ipc.Call(ipc.Request{Cmd: "status"})
+	if err != nil || resp.Status == nil {
+		return nil
+	}
+	if (resp.Status.Active || resp.Status.Healing) && resp.Status.Profile == name {
+		return fmt.Errorf("profile %q is connected — run 'parsvpn down' first", name)
+	}
+	return nil
+}
+
+// DNSBehavior describes in one line what connecting does to system DNS.
+func (p *Profile) DNSBehavior() string {
+	switch {
+	case p.OverrideSystemDNS:
+		return "all system DNS goes through the tunnel to " + p.UpstreamDNSHost()
+	case len(p.SplitTunnel.HostOverrides) > 0:
+		return "system DNS unchanged; only pinned hosts are answered by ParsVPN (via tunnel DNS " + p.UpstreamDNSHost() + ")"
+	default:
+		return "system DNS unchanged"
+	}
+}
+
+// DisplayIP is the override target as shown to users.
+func (o HostOverride) DisplayIP() string {
+	if IsDynamicOverride(o) {
+		return "(each name → its own IP, via tunnel)"
+	}
+	return o.IP
+}
+
+// ProfilesUsingPreset lists profiles whose bypass_preset is name.
+func ProfilesUsingPreset(name string) []string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	names, _ := List()
+	var out []string
+	for _, n := range names {
+		if p, err := Load(n); err == nil && p.SplitTunnel.BypassPreset == name {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// ReloadIfActiveUsesPreset re-applies the connected profile when it uses the
+// named preset, so preset edits take effect without reconnecting.
+func ReloadIfActiveUsesPreset(name string) (bool, error) {
+	resp, err := ipc.Call(ipc.Request{Cmd: "status"})
+	if err != nil || resp.Status == nil || !resp.Status.Active {
+		return false, nil
+	}
+	p, err := Load(resp.Status.Profile)
+	if err != nil || p.SplitTunnel.BypassPreset != strings.ToLower(strings.TrimSpace(name)) {
+		return false, nil
+	}
+	reload, err := ipc.Call(ipc.Request{Cmd: "reload"})
+	if err != nil {
+		return false, fmt.Errorf("preset saved, but reload failed: %w", err)
+	}
+	if !reload.OK {
+		return false, fmt.Errorf("preset saved, but reload failed: %s", reload.Error)
+	}
+	return true, nil
 }

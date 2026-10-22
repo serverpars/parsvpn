@@ -19,13 +19,7 @@ func LookupA(name, upstream string, timeout time.Duration) (net.IP, error) {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	upstream = strings.TrimSpace(upstream)
-	if upstream == "" {
-		upstream = "1.1.1.1:53"
-	}
-	if !strings.Contains(upstream, ":") {
-		upstream = net.JoinHostPort(upstream, "53")
-	}
+	upstream = UpstreamAddr(upstream)
 
 	m := new(dns.Msg)
 	m.SetQuestion(dns.Fqdn(name), dns.TypeA)
@@ -48,4 +42,17 @@ func LookupA(name, upstream string, timeout time.Duration) (net.IP, error) {
 		}
 	}
 	return nil, fmt.Errorf("dns lookup %s: no A record", name)
+}
+
+// UpstreamAddr returns host:port for a DNS server given as an IP (v4 or bare
+// v6), hostname, or host:port. Port defaults to 53; empty means 1.1.1.1:53.
+func UpstreamAddr(server string) string {
+	server = strings.TrimSpace(server)
+	if server == "" {
+		return "1.1.1.1:53"
+	}
+	if _, _, err := net.SplitHostPort(server); err == nil {
+		return server
+	}
+	return net.JoinHostPort(strings.Trim(server, "[]"), "53")
 }

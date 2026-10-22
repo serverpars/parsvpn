@@ -12,8 +12,23 @@ import (
 // ImportFile loads a WireGuard .conf or ParsVPN JSON profile from path.
 // If path is "-", content is read from stdin (treated as WireGuard conf unless
 // the first non-space byte is '{'). If name is empty, the filename stem is used
-// (or "stdin" when reading from stdin).
+// (or "stdin" when reading from stdin). An explicit name also overrides the
+// "name" field inside a JSON profile.
 func ImportFile(path, name string) (*Profile, error) {
+	p, err := importFile(path, name)
+	if err != nil {
+		return nil, err
+	}
+	if name != "" && p.Name != name {
+		if err := ValidateName(name); err != nil {
+			return nil, err
+		}
+		p.Name = name
+	}
+	return p, nil
+}
+
+func importFile(path, name string) (*Profile, error) {
 	if path == "-" {
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil {

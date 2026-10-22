@@ -56,7 +56,10 @@ func (s *Sampler) captureOnce(stop <-chan struct{}) error {
 	if err != nil {
 		return err
 	}
-	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htons(unix.ETH_P_ALL)))
+	// SOCK_DGRAM delivers the L3 packet without a link header. pv-tun0 has
+	// none, and guessing one from bytes 12-13 misparsed IPv4 packets whose
+	// source address happens to start with 8.0 or 134.221.
+	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_DGRAM, int(htons(unix.ETH_P_ALL)))
 	if err != nil {
 		return err
 	}
@@ -93,15 +96,7 @@ func (s *Sampler) captureOnce(stop <-chan struct{}) error {
 	}
 }
 
-func (s *Sampler) handlePacket(b []byte) {
-	payload := b
-	// Skip Ethernet header when present (dst+src+type = 14).
-	if len(b) >= 14 {
-		et := binary.BigEndian.Uint16(b[12:14])
-		if et == unix.ETH_P_IP || et == unix.ETH_P_IPV6 {
-			payload = b[14:]
-		}
-	}
+func (s *Sampler) handlePacket(payload []byte) {
 	if len(payload) < 1 {
 		return
 	}

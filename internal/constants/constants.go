@@ -4,7 +4,7 @@ import "time"
 
 const (
 	AppName    = "parsvpn"
-	Version    = "1.6.19"
+	Version    = "2.0.0"
 	IfaceName  = "pv-tun0"
 	RouteTable = 51920
 	// FwMark marks conntrack entries for inbound connections that arrived on a
@@ -30,7 +30,8 @@ const (
 	RulePrefBypassMark = 13995
 
 	// RulePrefMin/Max bound destination policy rules (include destinations and
-	// exclude-mode bypass CIDRs). Catch-all exclude rule uses RulePrefCatchAll.
+	// exclude-mode bypass CIDRs). RulePrefCatchAll holds the exclude-mode
+	// catch-all, or in include mode the table lookup for dynamic wildcard /32s.
 	RulePrefMin      = 14000
 	RulePrefMax      = 16998
 	RulePrefCatchAll = 16999
@@ -47,7 +48,12 @@ const (
 	SocketPath       = "/var/run/parsvpn/daemon.sock"
 	LockPath         = "/var/run/parsvpn/daemon.lock"
 	StatePath        = "/var/run/parsvpn/state.json"
-	ResolvBak        = "/var/run/parsvpn/resolv.conf.bak"
+	// ResolvBak holds the pre-tunnel /etc/resolv.conf. It lives on persistent
+	// storage so the original survives a crash or power loss while the managed
+	// resolv.conf (which also persists) is still in place.
+	ResolvBak = "/etc/parsvpn/resolv.conf.bak"
+	// LegacyResolvBak was under /var/run (tmpfs) and is checked on restore.
+	LegacyResolvBak = "/var/run/parsvpn/resolv.conf.bak"
 
 	DNSListenAddr = "127.0.0.199:53"
 

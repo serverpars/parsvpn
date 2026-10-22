@@ -227,14 +227,8 @@ func onOff(v bool) string {
 func (m model) viewSettings() string {
 	header := titleStyle.Render("Settings")
 	hint := "Global daemon options (saved to /etc/parsvpn/config.json)."
-	var errLine string
-	if m.err != "" {
-		errLine = "\nError: " + m.err + "\n"
-	}
-	if m.notice != "" {
-		errLine += "\n" + m.notice + "\n"
-	}
-	help := helpStyle.Render("[enter/space] Toggle or edit  [c] Clear reconnect  [0] Default interval  [esc] Back")
+	errLine := m.messages()
+	help := m.help("[enter/space] Toggle or edit  [c] Clear reconnect  [0] Default interval  [esc] Back")
 	return header + "\n" + hint + "\n\n" + m.editList.View() + errLine + "\n" + help
 }
 
@@ -244,10 +238,7 @@ func (m model) viewSettingsEditInterval() string {
 		fmt.Sprintf("Default is %s. Minimum 60 seconds; enter 0 for default.\n\n",
 			constants.DefaultUpdateCheckInterval) +
 		promptStyle.Render("seconds:") + "\n" + m.nameInput.View()
-	var errLine string
-	if m.err != "" {
-		errLine = "\nError: " + m.err + "\n"
-	}
-	help := helpStyle.Render("[enter] Save  [esc] Back")
+	errLine := m.messages()
+	help := m.help("[enter] Save  [esc] Back")
 	return header + "\n\n" + body + errLine + "\n\n" + help
 }

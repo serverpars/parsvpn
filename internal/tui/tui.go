@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/filepicker"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -22,7 +23,7 @@ import (
 )
 
 var (
-	titleStyle  = lipgloss.NewStyle().Bold(true)
+	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(accent)
 	statusOn    = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
 	statusHeal  = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
 	statusOff   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
@@ -68,15 +69,16 @@ const (
 type item struct {
 	name   string
 	active bool
+	desc   string
 }
 
 func (i item) Title() string {
 	if i.active {
-		return "* " + i.name
+		return okStyle.Render("●") + " " + i.name
 	}
-	return "  " + i.name
+	return labelStyle.Render("○") + " " + i.name
 }
-func (i item) Description() string { return "" }
+func (i item) Description() string { return i.desc }
 func (i item) FilterValue() string { return i.name }
 
 type model struct {
@@ -102,6 +104,10 @@ type model struct {
 	hostAlsoWWW   bool
 	trafficLines  []string
 	presetName    string
+	// busy names a long-running action in progress (connect, apply, resolve);
+	// shown with a spinner and blocks repeated toggles.
+	busy string
+	spin spinner.Model
 }
 
 type tickMsg struct{}
@@ -130,6 +136,13 @@ type updateAppliedMsg struct {
 	err     error
 }
 
+// toggleDoneMsg ends a connect/disconnect started from the profile list.
+type toggleDoneMsg struct {
+	st      ipc.StatusPayload
+	err     error
+	message string
+}
+
 type trafficMsg struct {
 	lines []string
 	err   error
@@ -155,10 +168,11 @@ func Run() error {
 func newModel(names []string, st ipc.StatusPayload) model {
 	items := make([]list.Item, 0, len(names))
 	for _, n := range names {
-		items = append(items, item{name: n, active: st.Active && st.Profile == n})
+		items = append(items, newItem(n, st))
 	}
 	delegate := list.NewDefaultDelegate()
-	delegate.ShowDescription = false
+	delegate.ShowDescription = true
+	delegate.SetSpacing(0)
 	l := list.New(items, delegate, 30, 12)
 	l.Title = "Profiles"
 	l.SetShowHelp(false)
@@ -195,7 +209,11 @@ func newModel(names []string, st ipc.StatusPayload) model {
 	ta.SetWidth(60)
 	ta.SetHeight(12)
 
-	return model{list: l, status: st, picker: fp, nameInput: ti, pasteArea: ta, editList: newEditList()}
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = busyStyle
+
+	return model{list: l, status: st, picker: fp, nameInput: ti, pasteArea: ta, editList: newEditList(), spin: sp}
 }
 
 func (m model) Init() tea.Cmd {
@@ -274,6 +292,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(refreshTraffic, scheduleTick())
 		}
 		return m, scheduleTick()
+	case spinner.TickMsg:
+		if m.busy == "" {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spin, cmd = m.spin.Update(msg)
+		return m, cmd
+	case toggleDoneMsg:
+		m.busy = ""
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			m.notice = ""
+			return m, refreshStatus
+		}
+		m.err = ""
+		m.notice = msg.message
+		m.status = msg.st
+		m.syncActiveFlags()
+		return m, nil
 	case statusMsg:
 		if msg.err != nil {
 			// Only surface status-fetch failures on the browse screen so a
@@ -305,6 +342,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setProfiles(msg.names)
 		}
 	case opDoneMsg:
+		m.busy = ""
 		if msg.err != nil {
 			m.err = msg.err.Error()
 			m.notice = ""
@@ -321,6 +359,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pasteArea.Reset()
 		return m, tea.Batch(refreshProfiles, refreshStatus)
 	case editDoneMsg:
+		m.busy = ""
 		if msg.err != nil {
 			m.err = msg.err.Error()
 			m.notice = ""
@@ -354,13 +393,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Profile JSON already has the new preset — refresh the Split list now,
 		// then apply routes asynchronously so a slow reload can't hide the change.
 		m.err = ""
-		m.notice = msg.message
+		m.notice = ""
+		m.busy = msg.message
 		m.nameInput.Blur()
 		m.nameInput.Placeholder = "profile-name"
 		next, cmd := m.openEditSplit()
 		m = next.(model)
-		return m, tea.Batch(cmd, applyPresetReload(msg.profile), refreshStatus)
+		return m, tea.Batch(cmd, applyPresetReload(msg.profile), refreshStatus, m.spin.Tick)
 	case presetDoneMsg:
+		m.busy = ""
 		if msg.err != nil {
 			m.err = msg.err.Error()
 			m.notice = ""
@@ -389,6 +430,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, refreshStatus
 		}
 	case settingsDoneMsg:
+		m.busy = ""
 		if msg.err != nil {
 			m.err = msg.err.Error()
 			m.notice = ""
@@ -414,6 +456,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateVersion = msg.version
 	case updateAppliedMsg:
 		m.updating = false
+		m.busy = ""
 		if msg.err != nil {
 			m.err = msg.err.Error()
 		} else {
@@ -505,16 +548,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// While typing a list filter (/), keys are filter text, not shortcuts:
+	// otherwise "q" quit and "d" opened delete mid-search.
+	if m.list.FilterState() == list.Filtering {
+		var cmd tea.Cmd
+		m.list, cmd = m.list.Update(msg)
+		return m, cmd
+	}
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
-	case " ":
+	case " ", "enter":
 		it, ok := m.list.SelectedItem().(item)
 		if !ok {
 			return m, nil
 		}
+		if m.busy != "" {
+			return m, nil // one connect/disconnect at a time
+		}
+		isActive := m.status.Active && m.status.Profile == it.name
 		m.notice = ""
-		return m, toggleProfile(it.name, m.status.Active && m.status.Profile == it.name)
+		m.err = ""
+		switch {
+		case isActive:
+			m.busy = fmt.Sprintf("Disconnecting %s…", it.name)
+		case m.status.Active:
+			m.busy = fmt.Sprintf("Switching %s → %s…", m.status.Profile, it.name)
+		default:
+			m.busy = fmt.Sprintf("Connecting %s…", it.name)
+		}
+		return m, tea.Batch(toggleProfile(it.name, isActive), m.spin.Tick)
 	case "r":
 		m.notice = ""
 		return m, tea.Batch(refreshStatus, refreshProfiles)
@@ -530,9 +593,10 @@ func (m model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.updating = true
-		m.notice = "downloading update..."
+		m.busy = "Downloading " + update.FormatVersion(m.updateVersion) + "…"
+		m.notice = ""
 		m.err = ""
-		return m, applyUpdate
+		return m, tea.Batch(applyUpdate, m.spin.Tick)
 	case "d":
 		it, ok := m.list.SelectedItem().(item)
 		if !ok {
@@ -720,6 +784,9 @@ func saveProfile(src addSource, path, content, name string) tea.Cmd {
 			p, err = profile.NewEmpty(name)
 		case addFromPaste:
 			p, err = profile.ImportBytes([]byte(content), name)
+			if err == nil && name != "" {
+				p.Name = name // the typed name wins over a pasted JSON "name"
+			}
 		default:
 			p, err = profile.ImportFile(path, name)
 		}
@@ -739,6 +806,9 @@ func saveProfile(src addSource, path, content, name string) tea.Cmd {
 
 func deleteProfile(name string) tea.Cmd {
 	return func() tea.Msg {
+		if err := profile.EnsureNotActive(name); err != nil {
+			return opDoneMsg{err: err}
+		}
 		if err := profile.Delete(name); err != nil {
 			return opDoneMsg{err: fmt.Errorf("delete profile: %w (try running as root)", err)}
 		}
@@ -756,25 +826,47 @@ func toggleProfile(name string, isActive bool) tea.Cmd {
 			resp, err = ipc.Call(ipc.Request{Cmd: "up", Profile: name})
 		}
 		if err != nil {
-			return statusMsg{err: err}
+			return toggleDoneMsg{err: err}
 		}
 		if !resp.OK {
-			return statusMsg{err: fmt.Errorf("%s", resp.Error)}
+			return toggleDoneMsg{err: fmt.Errorf("%s", resp.Error)}
 		}
+		st := ipc.StatusPayload{}
 		if resp.Status != nil {
-			return statusMsg{st: *resp.Status}
+			st = *resp.Status
+		} else if fresh, err := fetchStatus(); err == nil {
+			st = fresh
 		}
-		return refreshStatus()
+		msg := "Disconnected"
+		if !isActive {
+			msg = "Connected to " + name
+		}
+		return toggleDoneMsg{st: st, message: msg}
 	}
+}
+
+// newItem builds a profile list row: connection dot plus a one-line summary.
+func newItem(name string, st ipc.StatusPayload) item {
+	it := item{name: name, active: (st.Active || st.Healing) && st.Profile == name}
+	p, err := profile.Load(name)
+	switch {
+	case err != nil:
+		it.desc = "  (cannot load)"
+	case it.active && st.Healing:
+		it.desc = "  reconnecting…"
+	case it.active:
+		it.desc = "  connected · " + p.EffectiveMode()
+	default:
+		it.desc = "  " + p.EffectiveMode()
+	}
+	return it
 }
 
 func (m *model) syncActiveFlags() {
 	items := m.list.Items()
 	for i, it := range items {
 		if ii, ok := it.(item); ok {
-			ii.active = (m.status.Active && m.status.Profile == ii.name) ||
-				(m.status.Healing && m.status.Profile == ii.name)
-			items[i] = ii
+			items[i] = newItem(ii.name, m.status)
 		}
 	}
 	m.list.SetItems(items)
@@ -783,7 +875,7 @@ func (m *model) syncActiveFlags() {
 func (m *model) setProfiles(names []string) {
 	items := make([]list.Item, 0, len(names))
 	for _, n := range names {
-		items = append(items, item{name: n, active: m.status.Active && m.status.Profile == n})
+		items = append(items, newItem(n, m.status))
 	}
 	m.list.SetItems(items)
 }
@@ -857,11 +949,8 @@ func (m model) viewTraffic() string {
 	if body == "" {
 		body = "(no samples yet — browse through the tunnel or enable DNS override)"
 	}
-	var errLine string
-	if m.err != "" {
-		errLine = "\nError: " + m.err + "\n"
-	}
-	help := helpStyle.Render("[r] Refresh  [c] Clear  [esc] Back")
+	errLine := m.messages()
+	help := m.help("[r] Refresh  [c] Clear  [esc] Back")
 	return header + "\n\n" + body + errLine + "\n\n" + help
 }
 
@@ -902,136 +991,128 @@ func clearTraffic() tea.Msg {
 }
 
 func (m model) viewBrowse() string {
-	statusLine := statusOff.Render("[STATUS: INACTIVE]")
-	if m.status.Healing {
+	var statusLine string
+	switch {
+	case m.status.Healing:
 		prof := m.status.Profile
 		if prof == "" {
 			prof = m.status.AutostartProfile
 		}
-		if prof == "" {
-			prof = "?"
-		}
-		statusLine = statusHeal.Render(fmt.Sprintf("[STATUS: HEALING -> %s]", prof))
-	} else if m.status.Active {
-		statusLine = statusOn.Render(fmt.Sprintf("[STATUS: ACTIVE -> %s]", m.status.Interface))
+		statusLine = statusHeal.Render("◐ RECONNECTING " + orDash(prof))
+	case m.status.Active:
+		statusLine = statusOn.Render("● CONNECTED " + m.status.Profile)
+	default:
+		statusLine = statusOff.Render("○ DISCONNECTED")
 	}
-	header := titleStyle.Render(fmt.Sprintf("parsvpn %s", constants.Version)) + "   " + statusLine
+	header := titleStyle.Render("ParsVPN "+constants.Version) + "   " + statusLine
 
-	var detail strings.Builder
 	sel := ""
 	if it, ok := m.list.SelectedItem().(item); ok {
 		sel = it.name
 	}
 
-	if m.status.Healing {
-		prof := m.status.Profile
-		if prof == "" {
-			prof = m.status.AutostartProfile
+	var detail strings.Builder
+	switch {
+	case m.status.Healing:
+		detail.WriteString(sectionHead.Render("Reconnecting") + "\n")
+		detail.WriteString("The tunnel interface was lost; ParsVPN is\nbringing it back. This takes a few seconds.\n\n")
+	case m.status.Active:
+		detail.WriteString(sectionHead.Render("Connection") + "\n")
+		detail.WriteString(kv("Profile", m.status.Profile))
+		detail.WriteString(kv("Endpoint", orDash(m.status.Endpoint)))
+		detail.WriteString(kv("Tunnel IP", orDash(m.status.Address)))
+		hs := orDash(m.status.Handshake)
+		if hs == "never" {
+			hs = busyStyle.Render("never — check the endpoint and keys")
 		}
-		detail.WriteString(fmt.Sprintf("Auto-healing tunnel for profile %q.\n", prof))
-		detail.WriteString("Interface was lost; reconnecting — wait a moment.\n")
-		detail.WriteString("----------------------------------------------\n")
-	} else if m.status.Active {
-		detail.WriteString(fmt.Sprintf("Active:    %s\n", m.status.Profile))
-		detail.WriteString(fmt.Sprintf("Endpoint:  %s\n", m.status.Endpoint))
-		detail.WriteString(fmt.Sprintf("Local IP:  %s\n", m.status.Address))
-		detail.WriteString(fmt.Sprintf("Handshake: %s\n", m.status.Handshake))
-		detail.WriteString(fmt.Sprintf("Transfer:  %s RX / %s TX\n", humanBytes(m.status.RxBytes), humanBytes(m.status.TxBytes)))
-		detail.WriteString("----------------------------------------------\n")
-	} else if len(m.list.Items()) == 0 {
-		detail.WriteString("No profiles yet.\nPress [a] to add a profile (file, paste, or empty tunnel).\n")
-	} else if sel == "" {
-		detail.WriteString("Select a profile.\nPress Space to connect, [e] to edit, [p] for presets.\n")
+		detail.WriteString(kv("Handshake", hs))
+		detail.WriteString(kv("Traffic", fmt.Sprintf("↓ %s  ↑ %s", humanBytes(m.status.RxBytes), humanBytes(m.status.TxBytes))))
+		if m.status.DynamicRoutes > 0 {
+			detail.WriteString(kv("Wildcards", fmt.Sprintf("%d IPs routed", m.status.DynamicRoutes)))
+		}
+		detail.WriteString("\n")
+	case len(m.list.Items()) == 0:
+		detail.WriteString(sectionHead.Render("Welcome") + "\n")
+		detail.WriteString("No profiles yet. Press " + keyStyle.Render("a") + " to import a\nWireGuard .conf, paste one, or create an empty tunnel.\n\n")
 	}
 
-	// Always show selected profile config from disk so edits (hosts/routes/DNS)
-	// appear immediately on return to the main menu — not only from stale status.
+	// Always show the selected profile's config from disk so edits appear
+	// immediately on return to this screen.
 	if sel != "" {
-		if m.status.Active && m.status.Profile != sel {
-			detail.WriteString(fmt.Sprintf("Selected:  %s (not connected)\n", sel))
-			detail.WriteString("----------------------------------------------\n")
-		} else if !m.status.Active && !m.status.Healing {
-			detail.WriteString(fmt.Sprintf("Selected:  %s\n", sel))
-			detail.WriteString("----------------------------------------------\n")
+		title := "Profile " + sel
+		if !(m.status.Active && m.status.Profile == sel) {
+			title += labelStyle.Render("  (press enter to connect)")
 		}
+		detail.WriteString(sectionHead.Render(title) + "\n")
 		writeProfileDiskDetail(&detail, sel)
 	}
 
-	auto := "off"
-	if m.status.AutoConnect {
-		auto = "on"
-	}
-	wanted := m.status.AutostartProfile
-	if wanted == "" {
-		wanted = "-"
-	}
-	au := "off"
-	if m.status.AutoUpdate {
-		au = "on"
-	}
-	detail.WriteString(fmt.Sprintf("Autostart: %s (reconnects as %s)\n", auto, wanted))
-	detail.WriteString(fmt.Sprintf("Autoupdate: %s\n", au))
-
+	detail.WriteString("\n")
+	wanted := orDash(m.status.AutostartProfile)
+	detail.WriteString(kv("Autostart", fmt.Sprintf("%s (reconnects %s)", onOff(m.status.AutoConnect), wanted)))
+	detail.WriteString(kv("Autoupdate", onOff(m.status.AutoUpdate)))
 	if m.updateVersion != "" {
-		detail.WriteString(fmt.Sprintf("\nUpdate available: %s (press [u] to install)\n",
-			update.FormatVersion(m.updateVersion)))
-	}
-	if m.notice != "" {
-		detail.WriteString("\n" + m.notice + "\n")
-	}
-	if m.err != "" {
-		detail.WriteString("\nError: " + m.err + "\n")
+		detail.WriteString("\n" + busyStyle.Render(fmt.Sprintf("Update %s available — press u to install",
+			update.FormatVersion(m.updateVersion))) + "\n")
 	}
 
-	body := lipgloss.JoinHorizontal(lipgloss.Top, m.list.View(), detailStyle.Render(detail.String()))
-	help := helpStyle.Render("[Space] Toggle  [a] Add  [e] Edit  [p] Presets  [s] Settings  [t] Traffic  [d] Delete  [u] Update  [r] Refresh  [q] Quit")
-	return header + "\n\n" + body + "\n\n" + help
+	panelWidth := 0
+	if m.width > 0 {
+		panelWidth = max(30, m.width-m.list.Width()-6)
+	}
+	panel := panelStyle.Width(panelWidth).Render(strings.TrimRight(detail.String(), "\n"))
+	body := lipgloss.JoinHorizontal(lipgloss.Top, m.list.View(), " ", panel)
+
+	help := m.help("[enter] Connect/disconnect  [a] Add  [e] Edit  [p] Presets  [s] Settings  [t] Traffic  [d] Delete  [/] Search  [q] Quit")
+	if m.updateVersion != "" {
+		help = m.help("[u] Install update") + "\n" + help
+	}
+	return header + "\n\n" + body + "\n" + m.messages() + "\n" + help
 }
 
 // writeProfileDiskDetail appends split/DNS/hosts/routes from the profile file.
 func writeProfileDiskDetail(detail *strings.Builder, name string) {
 	p, err := profile.Load(name)
 	if err != nil {
-		detail.WriteString("Profile: (could not load)\n")
+		detail.WriteString(errStyle.Render("cannot load: "+err.Error()) + "\n")
 		return
 	}
-	presetName := p.SplitTunnel.BypassPreset
-	if presetName == "" {
-		presetName = "none"
+	switch p.EffectiveMode() {
+	case profile.SplitModeExclude:
+		bypass := "nothing extra"
+		if p.SplitTunnel.BypassPreset != "" {
+			bypass = "preset " + p.SplitTunnel.BypassPreset
+		}
+		if n := len(p.SplitTunnel.IPRanges); n > 0 {
+			bypass += fmt.Sprintf(" + %d range(s)", n)
+		}
+		detail.WriteString(kv("Mode", "exclude — everything via VPN except "+bypass))
+	default:
+		detail.WriteString(kv("Mode", fmt.Sprintf("include — only %d listed range(s) via VPN", len(p.SplitTunnel.IPRanges))))
 	}
-	detail.WriteString(fmt.Sprintf("Split: mode=%s preset=%s\n", p.EffectiveMode(), presetName))
 	if len(p.SplitTunnel.IPRanges) > 0 {
-		detail.WriteString("Routes:\n")
-		for i, c := range p.SplitTunnel.IPRanges {
-			if i >= 8 {
-				detail.WriteString(fmt.Sprintf("  … +%d more\n", len(p.SplitTunnel.IPRanges)-8))
-				break
-			}
-			detail.WriteString("  " + c + "\n")
+		shown := p.SplitTunnel.IPRanges
+		more := 0
+		if len(shown) > 6 {
+			more = len(shown) - 6
+			shown = shown[:6]
 		}
-	} else {
-		detail.WriteString("Routes: (none)\n")
+		line := strings.Join(shown, ", ")
+		if more > 0 {
+			line += fmt.Sprintf(" … +%d", more)
+		}
+		detail.WriteString(kv("Ranges", line))
 	}
-	dnsState := "off"
-	if p.OverrideSystemDNS {
-		dnsState = "on"
-	}
-	servers := p.UpstreamDNSHost()
-	if len(p.DNS) > 0 {
-		servers = strings.Join(p.DNS, ",")
-	}
-	detail.WriteString(fmt.Sprintf("DNS: override=%s servers=%s\n", dnsState, servers))
+	detail.WriteString(kv("DNS", p.DNSBehavior()))
 	if len(p.SplitTunnel.HostOverrides) > 0 {
-		detail.WriteString("Host Overrides:\n")
+		detail.WriteString(labelStyle.Render("Hosts") + "\n")
 		for i, o := range p.SplitTunnel.HostOverrides {
-			if i >= 12 {
-				detail.WriteString(fmt.Sprintf("  … +%d more\n", len(p.SplitTunnel.HostOverrides)-12))
+			if i >= 8 {
+				detail.WriteString(labelStyle.Render(fmt.Sprintf("  … +%d more", len(p.SplitTunnel.HostOverrides)-8)) + "\n")
 				break
 			}
-			detail.WriteString(fmt.Sprintf("  %s -> %s\n", o.Domain, o.IP))
+			detail.WriteString(fmt.Sprintf("  %s → %s\n", o.Domain, o.DisplayIP()))
 		}
-	} else {
-		detail.WriteString("Host Overrides: (none)\n")
 	}
 }
 
@@ -1043,27 +1124,21 @@ func (m model) viewAddChooser() string {
   [p]  Paste WireGuard config
   [e]  Create empty tunnel
 `
-	help := helpStyle.Render("[esc] Cancel")
+	help := m.help("[esc] Cancel")
 	return header + "\n\n" + body + "\n" + help
 }
 
 func (m model) viewAddFile() string {
 	header := titleStyle.Render("Add profile") + " — select a WireGuard .conf or .json file"
-	var errLine string
-	if m.err != "" {
-		errLine = "\n" + m.err + "\n"
-	}
-	help := helpStyle.Render("[enter] Select  [h] Up dir  [esc] Back")
+	errLine := m.messages()
+	help := m.help("[enter] Select  [h] Up dir  [esc] Back")
 	return header + "\n\n" + m.picker.View() + errLine + "\n" + help
 }
 
 func (m model) viewAddPaste() string {
 	header := titleStyle.Render("Add profile") + " — paste WireGuard config"
-	var errLine string
-	if m.err != "" {
-		errLine = "\n" + m.err + "\n"
-	}
-	help := helpStyle.Render("[ctrl+s] Continue  [esc] Back")
+	errLine := m.messages()
+	help := m.help("[ctrl+s] Continue  [esc] Back")
 	return header + "\n\n" + m.pasteArea.View() + errLine + "\n" + help
 }
 
@@ -1083,18 +1158,15 @@ func (m model) viewAddName() string {
 		promptStyle.Render("Profile name:"),
 		m.nameInput.View(),
 	)
-	var errLine string
-	if m.err != "" {
-		errLine = "\n" + m.err + "\n"
-	}
-	help := helpStyle.Render("[enter] Save  [esc] Back  [ctrl+c] Cancel")
+	errLine := m.messages()
+	help := m.help("[enter] Save  [esc] Back  [ctrl+c] Cancel")
 	return header + "\n\n" + body + errLine + "\n\n" + help
 }
 
 func (m model) viewConfirmDelete() string {
 	header := titleStyle.Render("Delete profile")
 	body := fmt.Sprintf("Delete profile %q?\nThis cannot be undone.", m.deleteName)
-	help := helpStyle.Render("[y] Yes  [n] No")
+	help := m.help("[y] Yes  [n] No")
 	return header + "\n\n" + body + "\n\n" + help
 }
 

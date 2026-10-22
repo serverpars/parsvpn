@@ -40,14 +40,17 @@ type Daemon struct {
 	watchStarted     atomic.Bool
 	healing          atomic.Bool
 	healingProfile   atomic.Value // string
+	dyn              dynRoutes
 }
 
 func New() *Daemon {
-	return &Daemon{
+	d := &Daemon{
 		net:    neteng.New(),
 		stopCh: make(chan struct{}),
 		healCh: make(chan struct{}, 1),
 	}
+	d.dyn.reset()
+	return d
 }
 
 // Run starts the daemon (blocking).
@@ -63,13 +66,18 @@ func (d *Daemon) Run() error {
 	defer neteng.ReleaseLock(d.lockFile)
 
 	_ = d.net.CleanupOrphans()
+	// A crashed daemon may have left resolv.conf pointing at the dead proxy.
+	if err := dnseng.RecoverResolvConf(); err != nil {
+		log.Printf("restore resolv.conf: %v", err)
+	}
 
 	ctrl, err := wg.New()
 	if err != nil {
 		return err
 	}
 	d.wg = ctrl
-	defer d.wg.Close()
+	// d.wg is replaced after userspace sessions; close whichever is current.
+	defer func() { d.wg.Close() }()
 
 	ln, err := ipc.Listen()
 	if err != nil {
@@ -206,7 +214,8 @@ func (d *Daemon) Up(name string) error {
 	_ = d.net.CleanupOrphans()
 	d.ignoreLinkDelete.Store(false)
 
-	session := d.sessionProfile(p)
+	session := d.sessionProfile(p, nil)
+	lookups := hostLookups{}
 
 	kernelOK, err := d.net.EnsureKernelWireGuard()
 	if err != nil {
@@ -214,20 +223,23 @@ func (d *Daemon) Up(name string) error {
 	}
 	if !kernelOK {
 		if err := d.wg.StartUserspace(session.MTU); err != nil {
+			_ = d.downLocked()
 			return fmt.Errorf("userspace wireguard: %w", err)
 		}
 	}
+	// downLocked on failure also stops a userspace device; a bare Teardown
+	// leaked it and the next StartUserspace could not recreate pv-tun0.
 	if err := d.configureAddressLocked(session); err != nil {
-		_ = d.net.Teardown()
+		_ = d.downLocked()
 		return err
 	}
-	if err := d.applyRoutesLocked(session); err != nil {
-		_ = d.net.Teardown()
+	if err := d.applyRoutesLocked(session, lookups); err != nil {
+		_ = d.downLocked()
 		return err
 	}
 
-	if err := d.startDNSLocked(session); err != nil {
-		_ = d.net.Teardown()
+	if err := d.startDNSLocked(session, lookups); err != nil {
+		_ = d.downLocked()
 		return err
 	}
 
@@ -250,8 +262,12 @@ func (d *Daemon) Up(name string) error {
 // already-bound ephemeral port on pv-tun0 is left alone.
 // wg.Configure also applies this; we do it here so d.active reflects the
 // effective port and so Up/Reload logs the coexistence fallback once.
-func (d *Daemon) sessionProfile(p *profile.Profile) *profile.Profile {
+// Hostname endpoints are resolved here too (see resolveEndpoints); prev is the
+// running session, used as a fallback when resolution fails.
+func (d *Daemon) sessionProfile(p, prev *profile.Profile) *profile.Profile {
 	session := *p
+	session.Peers = append([]profile.Peer(nil), p.Peers...)
+	resolveEndpoints(&session, prev)
 	held := 0
 	if d.wg != nil {
 		held = d.wg.ListenPort()
@@ -284,11 +300,169 @@ func (d *Daemon) configureAddressLocked(p *profile.Profile) error {
 	return d.net.AssignAddress(p.Address, p.MTU)
 }
 
-func (d *Daemon) applyRoutesLocked(p *profile.Profile) error {
+// resolveEndpoints replaces hostname peer endpoints with one resolved address so
+// WireGuard and the exclude-mode endpoint bypass use the same IP. Otherwise the
+// endpoint is never bypassed (the engine needs an IP) or, with round-robin DNS,
+// the bypass targets a different IP than WireGuard dials and handshakes loop
+// into the tunnel. On failure the previous session's address is reused.
+func resolveEndpoints(session, prev *profile.Profile) {
+	for i := range session.Peers {
+		ep := session.Peers[i].Endpoint
+		host, port, err := net.SplitHostPort(ep)
+		if err != nil || net.ParseIP(host) != nil {
+			continue
+		}
+		addr, err := net.ResolveUDPAddr("udp", ep)
+		if err == nil {
+			session.Peers[i].Endpoint = addr.String()
+			continue
+		}
+		log.Printf("resolve endpoint %s: %v", ep, err)
+		if prev == nil {
+			continue
+		}
+		for _, pp := range prev.Peers {
+			if pp.PublicKey != session.Peers[i].PublicKey {
+				continue
+			}
+			if prevHost, _, err := net.SplitHostPort(pp.Endpoint); err == nil && net.ParseIP(prevHost) != nil {
+				session.Peers[i].Endpoint = net.JoinHostPort(prevHost, port)
+			}
+		}
+	}
+}
+
+// endpointBypassCIDRs returns host routes for every peer endpoint IP; all of
+// them must stay on the main table in exclude mode, not only the primary one.
+func endpointBypassCIDRs(p *profile.Profile) []string {
+	var out []string
+	for _, peer := range p.Peers {
+		host, _, err := net.SplitHostPort(peer.Endpoint)
+		if err != nil {
+			continue
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.To4() != nil {
+			out = append(out, ip.String()+"/32")
+		}
+	}
+	return out
+}
+
+// hostLookups memoizes A lookups for one Up/Reload so exclude-mode bypass
+// routes and DNS pins for the same preset host agree on the address.
+type hostLookups map[string]net.IP
+
+func (c hostLookups) lookupA(host, upstream string) (net.IP, error) {
+	key := strings.ToLower(strings.TrimSuffix(host, "."))
+	if ip, ok := c[key]; ok {
+		return ip, nil
+	}
+	ip, err := dnseng.LookupA(host, upstream, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	c[key] = ip
+	return ip, nil
+}
+
+// maxDynamicRoutes bounds the /32s installed for dynamic wildcard answers;
+// the least recently resolved are dropped first.
+const maxDynamicRoutes = 1024
+
+// dynRoutes tracks IPs routed for dynamic wildcard answers. Its mutex is
+// separate from Daemon.mu because the DNS proxy calls in from its handlers,
+// and Reload holds Daemon.mu while stopping that proxy. Lock order: mu, then dyn.mu.
+type dynRoutes struct {
+	mu     sync.Mutex
+	seen   map[string]time.Time // IP → last resolved
+	static map[string]bool      // include-mode /32s owned by the profile; never deleted
+}
+
+func (r *dynRoutes) reset() {
+	r.mu.Lock()
+	r.seen = map[string]time.Time{}
+	r.static = map[string]bool{}
+	r.mu.Unlock()
+}
+
+// onDynamicResolve routes the answer IPs of a dynamic wildcard name via the
+// tunnel. Called by the DNS proxy before it replies.
+func (d *Daemon) onDynamicResolve(name string, ips []net.IP) {
+	d.dyn.mu.Lock()
+	defer d.dyn.mu.Unlock()
+	now := time.Now()
+	var fresh []net.IP
+	for _, ip := range ips {
+		v4 := ip.To4()
+		if v4 == nil {
+			continue
+		}
+		key := v4.String()
+		if _, ok := d.dyn.seen[key]; !ok {
+			fresh = append(fresh, v4)
+		}
+		d.dyn.seen[key] = now
+	}
+	if len(fresh) > 0 {
+		if err := d.net.AddHostRoutes(fresh); err != nil {
+			log.Printf("route %s answers %v: %v", name, fresh, err)
+		}
+	}
+	for len(d.dyn.seen) > maxDynamicRoutes {
+		oldest, oldestAt := "", now
+		for k, at := range d.dyn.seen {
+			if !at.After(oldestAt) {
+				oldest, oldestAt = k, at
+			}
+		}
+		delete(d.dyn.seen, oldest)
+		if !d.dyn.static[oldest] {
+			d.net.DelHostRoutes([]net.IP{net.ParseIP(oldest)})
+		}
+	}
+}
+
+// applyRoutesLocked installs the profile's routes and re-installs dynamic
+// wildcard routes (flushed with the table) while holding dyn.mu, so a DNS
+// answer cannot slip a route in between the flush and the rebuild.
+func (d *Daemon) applyRoutesLocked(p *profile.Profile, lookups hostLookups) error {
+	d.dyn.mu.Lock()
+	defer d.dyn.mu.Unlock()
+	if err := d.applyProfileRoutesLocked(p, lookups); err != nil {
+		return err
+	}
+	if !p.HasDynamicOverrides() {
+		d.dyn.seen = map[string]time.Time{}
+		return nil
+	}
+	d.dyn.static = map[string]bool{}
+	if p.EffectiveMode() == profile.SplitModeInclude {
+		for _, c := range p.DestinationCIDRs() {
+			if ip, n, err := net.ParseCIDR(c); err == nil {
+				if ones, bits := n.Mask.Size(); ones == bits {
+					d.dyn.static[ip.String()] = true
+				}
+			}
+		}
+		if err := d.net.EnsureTableLookupRule(); err != nil {
+			return err
+		}
+	}
+	ips := make([]net.IP, 0, len(d.dyn.seen))
+	for k := range d.dyn.seen {
+		ips = append(ips, net.ParseIP(k))
+	}
+	if err := d.net.AddHostRoutes(ips); err != nil {
+		log.Printf("restore dynamic routes: %v", err)
+	}
+	return nil
+}
+
+func (d *Daemon) applyProfileRoutesLocked(p *profile.Profile, lookups hostLookups) error {
 	switch p.EffectiveMode() {
 	case profile.SplitModeExclude:
 		bypass, err := p.BypassCIDRsResolved(func(host string) ([]net.IP, error) {
-			ip, err := dnseng.LookupA(host, p.UpstreamDNSHost(), 5*time.Second)
+			ip, err := lookups.lookupA(host, p.UpstreamDNSHost())
 			if err != nil {
 				return nil, err
 			}
@@ -297,16 +471,20 @@ func (d *Daemon) applyRoutesLocked(p *profile.Profile) error {
 		if err != nil {
 			return err
 		}
+		bypass = append(bypass, endpointBypassCIDRs(p)...)
 		return d.net.ApplyExcludeRoutes(bypass, p.PrimaryEndpointHost())
 	default:
 		cidrs := p.DestinationCIDRs()
-		if p.OverrideSystemDNS {
+		// The tunnel resolver must be reached through the tunnel whenever the
+		// proxy sends queries to it: catch-all override, or dynamic wildcards.
+		if p.OverrideSystemDNS || p.HasDynamicOverrides() {
 			cidrs = appendDNSRoute(cidrs, p.UpstreamDNSHost())
 		}
 		if len(cidrs) == 0 {
 			log.Printf("warning: profile %q has no split CIDRs — tunnel up but no policy routes", p.Name)
-			return nil
 		}
+		// Always apply, even when empty: it flushes the previous rules, so
+		// removing the last route on Reload no longer leaves it installed.
 		return d.net.ApplySplitRoutes(cidrs)
 	}
 }
@@ -325,17 +503,29 @@ func appendDNSRoute(cidrs []string, dnsHost string) []string {
 	return append(cidrs, want)
 }
 
-func (d *Daemon) startDNSLocked(p *profile.Profile) error {
+func (d *Daemon) startDNSLocked(p *profile.Profile, lookups hostLookups) error {
 	if d.dns != nil {
 		_ = d.dns.Stop()
 		d.dns = nil
 	}
-	overrides := d.effectiveHostOverrides(p)
+	overrides := d.effectiveHostOverrides(p, lookups)
 	if !p.OverrideSystemDNS && len(overrides) == 0 {
 		return nil
 	}
-	adapter := dnseng.DetectAdapter()
-	proxy := dnseng.NewProxy(overrides, firstDNS(p), adapter, p.OverrideSystemDNS)
+	// Read the host's resolvers after stopping the old proxy (which restores
+	// them) and before the new one rewrites anything.
+	var system []string
+	if !p.OverrideSystemDNS {
+		system = dnseng.SystemResolvers()
+	}
+	proxy := dnseng.NewProxy(dnseng.ProxyConfig{
+		Overrides:       overrides,
+		TunnelUpstream:  firstDNS(p),
+		SystemUpstreams: system,
+		CatchAll:        p.OverrideSystemDNS,
+		Adapter:         dnseng.DetectAdapter(),
+		OnResolve:       d.onDynamicResolve,
+	})
 	if err := proxy.Start(); err != nil {
 		return err
 	}
@@ -343,7 +533,7 @@ func (d *Daemon) startDNSLocked(p *profile.Profile) error {
 	return nil
 }
 
-func (d *Daemon) effectiveHostOverrides(p *profile.Profile) []profile.HostOverride {
+func (d *Daemon) effectiveHostOverrides(p *profile.Profile, lookups hostLookups) []profile.HostOverride {
 	out := append([]profile.HostOverride(nil), p.SplitTunnel.HostOverrides...)
 	name := strings.ToLower(strings.TrimSpace(p.SplitTunnel.BypassPreset))
 	if name == "" || name == "ir" || name == "none" {
@@ -364,7 +554,7 @@ func (d *Daemon) effectiveHostOverrides(p *profile.Profile) []profile.HostOverri
 			continue
 		}
 		lookup := profile.HostLookupName(h)
-		ip, err := dnseng.LookupA(lookup, dnsHost, 5*time.Second)
+		ip, err := lookups.lookupA(lookup, dnsHost)
 		if err != nil {
 			log.Printf("preset %q host %q resolve: %v", name, h, err)
 			continue
@@ -396,14 +586,15 @@ func (d *Daemon) Reload() error {
 	// onto a port already owned by wg0 (host add/reload was failing with
 	// "configure kernel wg: address already in use").
 	// wg.Configure also enforces this for Rekey and any future callers.
-	session := d.sessionProfile(p)
+	session := d.sessionProfile(p, d.active)
+	lookups := hostLookups{}
 	if err := d.wg.Configure(session); err != nil {
 		return err
 	}
-	if err := d.applyRoutesLocked(session); err != nil {
+	if err := d.applyRoutesLocked(session, lookups); err != nil {
 		return err
 	}
-	if err := d.startDNSLocked(session); err != nil {
+	if err := d.startDNSLocked(session, lookups); err != nil {
 		return err
 	}
 	d.active = session
@@ -448,6 +639,7 @@ func (d *Daemon) downLocked() error {
 		}
 	}
 	_ = d.net.Teardown()
+	d.dyn.reset()
 	d.active = nil
 	// Keep state.json while healing so clients can still show the profile name.
 	if !d.healing.Load() {
@@ -514,8 +706,15 @@ func (d *Daemon) statusLocked() ipc.StatusPayload {
 		st.Endpoint = d.active.Peers[0].Endpoint
 	}
 	for _, o := range d.active.SplitTunnel.HostOverrides {
+		if profile.IsDynamicOverride(o) {
+			st.Overrides = append(st.Overrides, o.Domain+" -> (each name's own IP)")
+			continue
+		}
 		st.Overrides = append(st.Overrides, o.Domain+" -> "+o.IP)
 	}
+	d.dyn.mu.Lock()
+	st.DynamicRoutes = len(d.dyn.seen)
+	d.dyn.mu.Unlock()
 	st.DNSOverride = d.active.OverrideSystemDNS
 	if len(d.active.DNS) > 0 {
 		st.DNSServers = append([]string(nil), d.active.DNS...)
@@ -758,21 +957,21 @@ func (d *Daemon) persistStateLocked() error {
 	return os.WriteFile(constants.StatePath, data, 0o600)
 }
 
+// firstDNS is the proxy upstream. It must be the same server whose /32 is
+// routed via the tunnel (UpstreamDNSHost), and IPv6 needs brackets.
 func firstDNS(p *profile.Profile) string {
-	if len(p.DNS) > 0 {
-		host := p.DNS[0]
-		if _, _, err := net.SplitHostPort(host); err != nil {
-			return host + ":53"
-		}
-		return host
-	}
-	return "1.1.1.1:53"
+	return dnseng.UpstreamAddr(p.UpstreamDNSHost())
 }
 
 func probeTunnel(p *profile.Profile) bool {
 	// Best-effort TCP connect to first host override IP or first split /32-ish peer gateway.
 	targets := []string{}
 	for _, o := range p.SplitTunnel.HostOverrides {
+		// Dynamic wildcards have no IP; ":53" would dial localhost and report
+		// a dead tunnel as healthy.
+		if net.ParseIP(o.IP) == nil {
+			continue
+		}
 		targets = append(targets, net.JoinHostPort(o.IP, "53"))
 		targets = append(targets, net.JoinHostPort(o.IP, "443"))
 	}

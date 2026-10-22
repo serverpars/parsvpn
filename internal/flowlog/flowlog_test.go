@@ -19,3 +19,16 @@ func TestRingSnapshot(t *testing.T) {
 		t.Fatal("remember")
 	}
 }
+
+func TestRememberIPBounded(t *testing.T) {
+	r := New(4)
+	for i := 0; i < maxIPDomains+10; i++ {
+		r.RememberIP(string(rune('a'+i%26))+string(rune(i)), "d")
+	}
+	r.mu.RLock()
+	n := len(r.ipToDomain)
+	r.mu.RUnlock()
+	if n > maxIPDomains {
+		t.Fatalf("ipToDomain grew to %d", n)
+	}
+}

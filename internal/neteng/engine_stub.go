@@ -4,6 +4,7 @@ package neteng
 
 import (
 	"fmt"
+	"net"
 	"os"
 )
 
@@ -22,6 +23,9 @@ func (e *Engine) ApplyExcludeRoutes([]string, string) error          { return er
 func (e *Engine) Teardown() error                                    { return nil }
 func (e *Engine) InterfaceIndex() (int, error)                       { return 0, errOS() }
 func (e *Engine) WatchLinkDeleted(<-chan struct{}, func()) error     { return errOS() }
+func (e *Engine) AddHostRoutes([]net.IP) error                       { return errOS() }
+func (e *Engine) DelHostRoutes([]net.IP)                             {}
+func (e *Engine) EnsureTableLookupRule() error                       { return errOS() }
 
 func AcquireLock(path string) (*os.File, error) {
 	if err := os.MkdirAll(dirOf(path), 0o700); err != nil {

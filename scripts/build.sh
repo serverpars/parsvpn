@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${VERSION:-1.3.2}"
+# Default to the source version so local builds compare correctly for updates.
+VERSION="${VERSION:-$(sed -n 's/^[[:space:]]*Version[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' internal/constants/constants.go | head -n1)}"
 DIST_DIR="./dist"
 mkdir -p "${DIST_DIR}"
 

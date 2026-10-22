@@ -16,6 +16,8 @@ import (
 // (avoids a hard D-Bus dependency while matching SetLinkDNS/SetLinkDomains semantics).
 type ResolvedAdapter struct {
 	applied bool
+	// fallback is used when resolvectl is missing; kept so Restore can undo it.
+	fallback *ResolvConfAdapter
 }
 
 func (a *ResolvedAdapter) Apply(opts ApplyOpts) error {
@@ -27,14 +29,16 @@ func (a *ResolvedAdapter) Apply(opts ApplyOpts) error {
 
 	if _, err := exec.LookPath("resolvectl"); err != nil {
 		// Fall back to resolv.conf if resolvectl missing.
-		fb := &ResolvConfAdapter{}
-		return fb.Apply(opts)
+		a.fallback = &ResolvConfAdapter{}
+		return a.fallback.Apply(opts)
 	}
 
 	cmd := exec.Command("resolvectl", "dns", ifIndex, "127.0.0.199")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("resolvectl dns: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
+	// Link DNS is now set: mark applied so a later failure still gets reverted.
+	a.applied = true
 
 	switch {
 	case opts.CatchAll:
@@ -56,11 +60,15 @@ func (a *ResolvedAdapter) Apply(opts ApplyOpts) error {
 	}
 
 	_ = exec.Command("resolvectl", "flush-caches").Run()
-	a.applied = true
 	return nil
 }
 
 func (a *ResolvedAdapter) Restore() error {
+	if a.fallback != nil {
+		err := a.fallback.Restore()
+		a.fallback = nil
+		return err
+	}
 	if !a.applied {
 		return nil
 	}

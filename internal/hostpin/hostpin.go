@@ -3,6 +3,7 @@ package hostpin
 import (
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/serverpars/parsvpn/internal/dnseng"
@@ -15,10 +16,15 @@ type AddOptions struct {
 	AlsoWWW bool
 }
 
-// Add resolves domain through the active tunnel's DNS path, then pins
-// domain→IP as a host override and adds the IP to split routes.
-// Domain may be exact (example.com) or wildcard (*.example.com); wildcards
-// resolve the parent apex for the pinned IP.
+// Add pins domain as a host override.
+//
+// Exact domains (example.com) are resolved now through the active tunnel's DNS
+// path; the domain→IP pin is saved and the IP added to split routes.
+//
+// Wildcards (*.example.com) are dynamic and return ip "": nothing is resolved
+// now. While connected, every subdomain is resolved through the tunnel DNS on
+// demand and its own answer IP is routed via the tunnel, so each name keeps
+// its real address. No active tunnel is needed to add one.
 func Add(profileName, domain string, opts AddOptions) (ip string, err error) {
 	domain, err = profile.NormalizeHostDomain(domain)
 	if err != nil {
@@ -27,6 +33,12 @@ func Add(profileName, domain string, opts AddOptions) (ip string, err error) {
 	p, err := profile.Load(profileName)
 	if err != nil {
 		return "", err
+	}
+	if strings.HasPrefix(domain, "*.") {
+		if err := p.PinHostWith(domain, "", false); err != nil {
+			return "", err
+		}
+		return "", saveReload(p)
 	}
 	if _, err := requireActive(profileName); err != nil {
 		return "", err

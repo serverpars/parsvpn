@@ -7,6 +7,10 @@ import (
 
 const DefaultCapacity = 256
 
+// maxIPDomains bounds the IP→domain annotation map. With system DNS override
+// every answer is remembered, so an unbounded map grows for the daemon's life.
+const maxIPDomains = 4096
+
 // Event is one observed DNS query or tunnel packet sample.
 type Event struct {
 	Time   time.Time `json:"time"`
@@ -56,8 +60,15 @@ func (r *Ring) Add(ev Event) {
 		r.full = true
 	}
 	if ev.Kind == "dns" && ev.Dst != "" && ev.Domain != "" {
-		r.ipToDomain[ev.Dst] = ev.Domain
+		r.rememberLocked(ev.Dst, ev.Domain)
 	}
+}
+
+func (r *Ring) rememberLocked(ip, domain string) {
+	if _, ok := r.ipToDomain[ip]; !ok && len(r.ipToDomain) >= maxIPDomains {
+		r.ipToDomain = map[string]string{}
+	}
+	r.ipToDomain[ip] = domain
 }
 
 // RememberIP associates an IP with a domain (from DNS answers).
@@ -66,7 +77,7 @@ func (r *Ring) RememberIP(ip, domain string) {
 		return
 	}
 	r.mu.Lock()
-	r.ipToDomain[ip] = domain
+	r.rememberLocked(ip, domain)
 	r.mu.Unlock()
 }
 

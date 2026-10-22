@@ -141,6 +141,12 @@ func cmdStatus() *cobra.Command {
 				st.Profile, st.Interface, st.Address, st.Endpoint, st.Handshake, st.RxBytes, st.TxBytes, strings.Join(st.SplitIPs, ", "),
 				boolOnOff(st.DNSOverride), dnsServersDisplay(st.DNSServers),
 				boolOnOff(st.AutoConnect), orDash(st.AutostartProfile), boolOnOff(st.AutoUpdate))
+			if len(st.Overrides) > 0 {
+				fmt.Printf("hosts: %s\n", strings.Join(st.Overrides, ", "))
+			}
+			if st.DynamicRoutes > 0 {
+				fmt.Printf("wildcard routes: %d IPs\n", st.DynamicRoutes)
+			}
 			return nil
 		},
 	}
@@ -232,6 +238,9 @@ Examples:
 		Short: "Delete a profile",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := profile.EnsureNotActive(args[0]); err != nil {
+				return err
+			}
 			if err := profile.Delete(args[0]); err != nil {
 				return err
 			}
@@ -346,8 +355,11 @@ func cmdHost() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if len(p.SplitTunnel.HostOverrides) == 0 {
+				fmt.Println("(no host overrides)")
+			}
 			for _, o := range p.SplitTunnel.HostOverrides {
-				fmt.Printf("%s %s\n", o.Domain, o.IP)
+				fmt.Printf("%-32s %s\n", o.Domain, o.DisplayIP())
 			}
 			return nil
 		},
@@ -355,17 +367,20 @@ func cmdHost() *cobra.Command {
 	var alsoWWW bool
 	add := &cobra.Command{
 		Use:   "add <profile> <domain> [ip]",
-		Short: "Pin a host: resolve domain via tunnel DNS (or use given IP), override + route",
-		Long: `Add a DNS host override and a /32 route for the resolved IP.
+		Short: "Send a host through the tunnel: pin its IP (exact) or route each subdomain (*.wildcard)",
+		Long: `Send a host's traffic through the tunnel.
 
-With only <domain>, the profile must be connected. DNS is queried through the
-tunnel (exclude mode, or by temporarily routing the resolver in include mode).
+Exact domain (example.com): resolved now through the tunnel DNS (the profile
+must be connected), then pinned domain→IP with a /32 route. Give [ip] to pin
+a fixed address without resolving.
 
-Domain may be exact (example.com) or a wildcard (*.example.com). Wildcards
-match any subdomain (www.example.com, api.example.com, …) but not the apex;
-the apex is resolved to choose the pinned IP.
+Wildcard (*.example.com): matches every subdomain (www., api., …) but not the
+apex. Each subdomain is resolved through the tunnel DNS when it is looked up,
+and its own answer IP is routed via the tunnel — names keep their real
+addresses. No connection needed to add one. Giving [ip] instead pins every
+subdomain to that one address.
 
-  --www   also pin www.<domain> to the same IP (ignored for wildcards)`,
+  --www   also pin www.<domain> to the same IP (exact domains only)`,
 		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			domain := args[1]
@@ -387,6 +402,11 @@ the apex is resolved to choose the pinned IP.
 			ip, err := hostpin.Add(args[0], domain, hostpin.AddOptions{AlsoWWW: alsoWWW})
 			if err != nil {
 				return err
+			}
+			if ip == "" {
+				fmt.Printf("wildcard %s on %s: each subdomain resolves via tunnel DNS and its own IP is routed\n",
+					domain, args[0])
+				return nil
 			}
 			fmt.Printf("host override %s -> %s on %s (+ route, via tunnel DNS%s)\n",
 				domain, ip, args[0], wwwNote(domain, alsoWWW))
@@ -426,12 +446,16 @@ func cmdDNS() *cobra.Command {
 		Short: "Override system DNS while the tunnel is up (bypass ISP filtering)",
 		Long: `Manage system DNS override for a profile.
 
-When override is on, ParsVPN runs an embedded resolver on 127.0.0.199 and
-points systemd-resolved / resolv.conf at it. Queries are forwarded through the
-tunnel to the profile DNS servers (or 1.1.1.1). This fixes filtered answers
-like youtube.com → 10.10.34.35 from ISP resolvers.
+override on:  ParsVPN runs an embedded resolver on 127.0.0.199 and makes it the
+              system resolver. All queries go through the tunnel to the profile
+              DNS servers (or 1.1.1.1). Fixes filtered ISP answers like
+              youtube.com → 10.10.34.35.
+override off: system DNS is left alone. If the profile has host pins, only
+              those names are answered by ParsVPN; every other lookup still
+              goes to your normal resolvers. The profile DNS servers are then
+              used only to resolve pinned / wildcard hosts through the tunnel.
 
-Importing a WireGuard conf with DNS= enables override automatically.`,
+Importing a WireGuard conf with DNS= turns override on.`,
 	}
 	showCmd := &cobra.Command{
 		Use:   "show <profile>",
@@ -446,8 +470,8 @@ Importing a WireGuard conf with DNS= enables override automatically.`,
 			if len(servers) == 0 {
 				servers = []string{p.UpstreamDNSHost() + " (default)"}
 			}
-			fmt.Printf("profile: %s\noverride: %s\nservers: %s\n",
-				p.Name, boolOnOff(p.OverrideSystemDNS), strings.Join(servers, ", "))
+			fmt.Printf("profile: %s\noverride: %s\nservers: %s\neffect: %s\n",
+				p.Name, boolOnOff(p.OverrideSystemDNS), strings.Join(servers, ", "), p.DNSBehavior())
 			return nil
 		},
 	}
@@ -475,7 +499,7 @@ Importing a WireGuard conf with DNS= enables override automatically.`,
 	}
 	setCmd := &cobra.Command{
 		Use:   "set <profile> <ip> [ip...]",
-		Short: "Set upstream DNS servers (and enable override)",
+		Short: "Set the tunnel DNS servers (does not change the override setting)",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := profile.Load(args[0])
@@ -485,11 +509,13 @@ Importing a WireGuard conf with DNS= enables override automatically.`,
 			if err := p.SetDNSServers(args[1:]...); err != nil {
 				return err
 			}
-			p.SetOverrideSystemDNS(true)
 			if err := saveProfileAndReload(p); err != nil {
 				return err
 			}
-			fmt.Printf("profile %s dns override=on servers=%s\n", p.Name, dnsServersDisplay(p.DNS))
+			fmt.Printf("profile %s dns servers=%s override=%s\n", p.Name, dnsServersDisplay(p.DNS), boolOnOff(p.OverrideSystemDNS))
+			if !p.OverrideSystemDNS {
+				fmt.Printf("note: used for host pins only; to send all system DNS through the tunnel run: parsvpn dns override %s on\n", p.Name)
+			}
 			return nil
 		},
 	}
@@ -551,7 +577,7 @@ func cmdSplit() *cobra.Command {
 				return err
 			}
 			msg := fmt.Sprintf("profile %s mode=%s", p.Name, p.EffectiveMode())
-			if args[1] == profile.SplitModeInclude && hadPreset {
+			if p.EffectiveMode() == profile.SplitModeInclude && hadPreset {
 				msg += " (cleared bypass preset)"
 			}
 			if dnsRouteNote := profile.DNSRoutesChangeNote(before, p.SplitTunnel.IPRanges, p.DNS...); dnsRouteNote != "" {
@@ -685,6 +711,11 @@ Apply to a profile with: sudo parsvpn split preset <profile> <name>`,
 				return err
 			}
 			fmt.Printf("preset %s: %d entries\n", p.Name, len(p.Entries))
+			if applied, err := profile.ReloadIfActiveUsesPreset(p.Name); err != nil {
+				return err
+			} else if applied {
+				fmt.Println("applied to active tunnel")
+			}
 			return nil
 		},
 	}
@@ -704,6 +735,11 @@ Apply to a profile with: sudo parsvpn split preset <profile> <name>`,
 				return err
 			}
 			fmt.Printf("preset %s: %d entries\n", p.Name, len(p.Entries))
+			if applied, err := profile.ReloadIfActiveUsesPreset(p.Name); err != nil {
+				return err
+			} else if applied {
+				fmt.Println("applied to active tunnel")
+			}
 			return nil
 		},
 	}
@@ -712,6 +748,9 @@ Apply to a profile with: sudo parsvpn split preset <profile> <name>`,
 		Short: "Delete a custom preset",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if users := profile.ProfilesUsingPreset(args[0]); len(users) > 0 {
+				return fmt.Errorf("preset %q is used by %s — switch them first: parsvpn split preset <profile> none", args[0], strings.Join(users, ", "))
+			}
 			if err := preset.Delete(args[0]); err != nil {
 				return err
 			}

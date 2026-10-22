@@ -57,7 +57,9 @@ func (c *Controller) Close() {
 	}
 	if c.client != nil {
 		_ = c.client.Close()
+		c.client = nil
 	}
+	c.userspace = false
 }
 
 func (c *Controller) Userspace() bool { return c.userspace }
@@ -190,6 +192,9 @@ func (c *Controller) Rekey(p *profile.Profile) error {
 
 // PeerHandshakeAge returns duration since last handshake for any peer.
 func (c *Controller) PeerHandshakeAge() (time.Duration, error) {
+	if c.client == nil {
+		return 0, fmt.Errorf("wireguard controller closed")
+	}
 	dev, err := c.client.Device(constants.IfaceName)
 	if err != nil {
 		if c.userspace {
@@ -202,6 +207,9 @@ func (c *Controller) PeerHandshakeAge() (time.Duration, error) {
 
 // Stats returns transfer counters and latest handshake time.
 func (c *Controller) Stats() (rx, tx int64, handshake time.Time, err error) {
+	if c.client == nil {
+		return 0, 0, time.Time{}, fmt.Errorf("wireguard controller closed")
+	}
 	dev, err := c.client.Device(constants.IfaceName)
 	if err != nil {
 		return 0, 0, time.Time{}, err
@@ -307,7 +315,12 @@ func cfgToUAPI(p *profile.Profile) (string, error) {
 			out += fmt.Sprintf("preshared_key=%x\n", psk[:])
 		}
 		if peer.Endpoint != "" {
-			out += fmt.Sprintf("endpoint=%s\n", peer.Endpoint)
+			// UAPI only accepts IP:port; resolve hostnames like the kernel path.
+			udp, err := net.ResolveUDPAddr("udp", peer.Endpoint)
+			if err != nil {
+				return "", fmt.Errorf("endpoint %s: %w", peer.Endpoint, err)
+			}
+			out += fmt.Sprintf("endpoint=%s\n", udp.String())
 		}
 		if peer.PersistentKeepalive > 0 {
 			out += fmt.Sprintf("persistent_keepalive_interval=%d\n", peer.PersistentKeepalive)

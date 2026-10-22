@@ -41,6 +41,7 @@ type StatusPayload struct {
 	TxBytes          int64     `json:"tx_bytes"`
 	SplitIPs         []string  `json:"split_ips,omitempty"`
 	Overrides        []string  `json:"overrides,omitempty"`
+	DynamicRoutes    int       `json:"dynamic_routes,omitempty"`
 	DNSOverride      bool      `json:"dns_override,omitempty"`
 	DNSServers       []string  `json:"dns_servers,omitempty"`
 	AutoConnect      bool      `json:"auto_connect,omitempty"`

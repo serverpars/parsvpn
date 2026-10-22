@@ -98,7 +98,8 @@ func (m model) openEditHosts() (tea.Model, tea.Cmd) {
 	}
 	items := make([]list.Item, 0, len(p.SplitTunnel.HostOverrides))
 	for _, o := range p.SplitTunnel.HostOverrides {
-		items = append(items, editItem{label: o.Domain + " " + o.IP})
+		// Domain must stay the first field: delete parses it back out.
+		items = append(items, editItem{label: o.Domain + "  →  " + o.DisplayIP()})
 	}
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = false
@@ -222,16 +223,24 @@ func (m model) updateEditHostAdd(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if strings.ContainsAny(domain, " \t") {
-			m.err = "enter domain only (IP is resolved via tunnel DNS)"
+			m.err = "enter the domain only (its IP is resolved via tunnel DNS)"
 			return m, nil
 		}
-		if _, err := profile.NormalizeHostDomain(domain); err != nil {
+		norm, err := profile.NormalizeHostDomain(domain)
+		if err != nil {
 			m.err = err.Error()
 			return m, nil
 		}
 		alsoWWW := m.hostAlsoWWW
 		m.hostAlsoWWW = false
-		return m, editAddHost(m.editProfile, domain, alsoWWW)
+		m.err = ""
+		m.notice = ""
+		if strings.HasPrefix(norm, "*.") {
+			m.busy = "Adding wildcard " + norm + "…"
+		} else {
+			m.busy = "Resolving " + norm + " through the tunnel…"
+		}
+		return m, tea.Batch(editAddHost(m.editProfile, domain, alsoWWW), m.spin.Tick)
 	}
 	var cmd tea.Cmd
 	m.nameInput, cmd = m.nameInput.Update(msg)
@@ -334,13 +343,13 @@ func (m model) updateEditSplit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "i":
-		return m, editSetMode(m.editProfile, profile.SplitModeInclude)
+		return m.withBusy("Switching to include mode…", editSetMode(m.editProfile, profile.SplitModeInclude))
 	case "x":
-		return m, editSetMode(m.editProfile, profile.SplitModeExclude)
+		return m.withBusy("Switching to exclude mode…", editSetMode(m.editProfile, profile.SplitModeExclude))
 	case "1":
-		return m, editSetPreset(m.editProfile, "ir")
+		return m.withBusy("Applying preset ir…", editSetPreset(m.editProfile, "ir"))
 	case "0":
-		return m, editSetPreset(m.editProfile, "none")
+		return m.withBusy("Clearing preset…", editSetPreset(m.editProfile, "none"))
 	case "m":
 		next, cmd := m.openPresets()
 		return next, cmd
@@ -358,11 +367,11 @@ func (m model) updateEditSplit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		switch it.id {
 		case "mode:include":
-			return m, editSetMode(m.editProfile, profile.SplitModeInclude)
+			return m.withBusy("Switching to include mode…", editSetMode(m.editProfile, profile.SplitModeInclude))
 		case "mode:exclude":
-			return m, editSetMode(m.editProfile, profile.SplitModeExclude)
+			return m.withBusy("Switching to exclude mode…", editSetMode(m.editProfile, profile.SplitModeExclude))
 		default:
-			return m, editSetPreset(m.editProfile, it.id)
+			return m.withBusy("Applying preset "+it.id+"…", editSetPreset(m.editProfile, it.id))
 		}
 	}
 	var cmd tea.Cmd
@@ -490,6 +499,12 @@ func editAddHost(profileName, domain string, alsoWWW bool) tea.Cmd {
 		if err != nil {
 			return editDoneMsg{err: err, reopen: "hosts"}
 		}
+		if ip == "" {
+			return editDoneMsg{
+				message: fmt.Sprintf("added %s — each subdomain resolves via tunnel DNS and its own IP is routed", domain),
+				reopen:  "hosts",
+			}
+		}
 		extra := ""
 		if alsoWWW {
 			if _, ok := profile.WWWCompanion(domain); ok {
@@ -529,7 +544,7 @@ func editSetMode(profileName, mode string) tea.Cmd {
 		}
 		msg := "mode=" + mode
 		if clearedPreset {
-			msg += " (cleared Iran preset)"
+			msg += " (cleared bypass preset)"
 		}
 		if note := profile.DNSRoutesChangeNote(before, p.SplitTunnel.IPRanges, p.DNS...); note != "" {
 			msg += " (" + note + ")"
@@ -567,7 +582,7 @@ func editSetPreset(profileName, presetName string) tea.Cmd {
 		}
 		return editPresetSavedMsg{
 			profile: profileName,
-			message: fmt.Sprintf("mode=%s preset=%s — applying to tunnel…", p.EffectiveMode(), label),
+			message: fmt.Sprintf("Saved mode=%s preset=%s — applying to tunnel…", p.EffectiveMode(), label),
 		}
 	}
 }
@@ -623,13 +638,13 @@ func editSetDNSServers(profileName string, servers ...string) tea.Cmd {
 		if err := p.SetDNSServers(servers...); err != nil {
 			return editDoneMsg{err: err, reopen: "dns"}
 		}
-		p.SetOverrideSystemDNS(true)
+		// Servers only: the override switch is separate ([o]/[f]).
 		applied, err := saveAndReload(p)
 		if err != nil {
 			return editDoneMsg{err: err, reopen: "dns"}
 		}
 		return editDoneMsg{
-			message: fmt.Sprintf("dns override=on servers=%s%s", strings.Join(p.DNS, ","), applyNote(applied)),
+			message: fmt.Sprintf("tunnel DNS servers = %s%s", strings.Join(p.DNS, ", "), applyNote(applied)),
 			reopen:  "dns",
 		}
 	}
@@ -666,60 +681,49 @@ func newEditList() list.Model {
 }
 
 func (m model) viewEditMenu() string {
-	header := titleStyle.Render(fmt.Sprintf("Edit profile — %s", m.editProfile))
-	body := `What do you want to manage?
-
-  [r]  Routes (split IP ranges / bypass CIDRs)
-  [h]  Host overrides (DNS pins)
-  [d]  System DNS override
-  [s]  Split mode & bypass preset (ir / custom)
-`
-	var errLine string
-	if m.err != "" {
-		errLine = "\nError: " + m.err + "\n"
+	header := titleStyle.Render("Edit profile — " + m.editProfile)
+	routes, hosts, dnsLine, split := "-", "-", "-", "-"
+	if p, err := profile.Load(m.editProfile); err == nil {
+		routes = fmt.Sprintf("%d range(s)", len(p.SplitTunnel.IPRanges))
+		hosts = fmt.Sprintf("%d pinned", len(p.SplitTunnel.HostOverrides))
+		dnsLine = "override " + onOff(p.OverrideSystemDNS)
+		split = p.EffectiveMode()
+		if p.SplitTunnel.BypassPreset != "" {
+			split += ", preset " + p.SplitTunnel.BypassPreset
+		}
 	}
-	if m.notice != "" {
-		errLine += "\n" + m.notice + "\n"
+	row := func(k, title, state string) string {
+		return "  " + keyStyle.Render(k) + "  " + padRight(title, 24) + labelStyle.Render(state) + "\n"
 	}
-	help := helpStyle.Render("[esc] Back")
-	return header + "\n\n" + body + errLine + "\n" + help
+	body := "What do you want to change?\n\n" +
+		row("s", "Split mode & preset", split) +
+		row("r", "IP ranges", routes) +
+		row("h", "Hosts & wildcards", hosts) +
+		row("d", "DNS", dnsLine)
+	help := m.help("[s] Split  [r] Ranges  [h] Hosts  [d] DNS  [esc] Back")
+	return header + "\n\n" + body + m.messages() + "\n" + help
 }
 
 func (m model) viewEditRoutes() string {
 	header := titleStyle.Render(m.editList.Title)
 	hint := "Include mode: these CIDRs go via tunnel.\nExclude mode: these CIDRs bypass the tunnel (plus preset)."
-	var errLine string
-	if m.err != "" {
-		errLine = "\nError: " + m.err + "\n"
-	}
-	if m.notice != "" {
-		errLine += "\n" + m.notice + "\n"
-	}
-	help := helpStyle.Render("[a] Add  [d] Delete  [esc] Back")
+	errLine := m.messages()
+	help := m.help("[a] Add  [d] Delete  [esc] Back")
 	return header + "\n" + hint + "\n\n" + m.editList.View() + errLine + "\n" + help
 }
 
 func (m model) viewEditRouteAdd() string {
 	header := titleStyle.Render(fmt.Sprintf("Add route — %s", m.editProfile))
 	body := promptStyle.Render("CIDR:") + "\n" + m.nameInput.View()
-	var errLine string
-	if m.err != "" {
-		errLine = "\nError: " + m.err + "\n"
-	}
-	help := helpStyle.Render("[enter] Save  [esc] Back")
+	errLine := m.messages()
+	help := m.help("[enter] Save  [esc] Back")
 	return header + "\n\n" + body + errLine + "\n\n" + help
 }
 
 func (m model) viewEditHosts() string {
 	header := titleStyle.Render(m.editList.Title)
-	var errLine string
-	if m.err != "" {
-		errLine = "\nError: " + m.err + "\n"
-	}
-	if m.notice != "" {
-		errLine += "\n" + m.notice + "\n"
-	}
-	help := helpStyle.Render("[a] Add  [d] Delete  [esc] Back")
+	errLine := m.messages()
+	help := m.help("[a] Add  [d] Delete  [esc] Back")
 	return header + "\n\n" + m.editList.View() + errLine + "\n" + help
 }
 
@@ -729,16 +733,16 @@ func (m model) viewEditHostAdd() string {
 	if m.hostAlsoWWW {
 		wwwState = "on"
 	}
-	body := "Resolves via tunnel DNS, then pins domain→IP and adds a /32 route.\n" +
-		"Use *.example.com for all subdomains (not the apex).\n" +
-		"Profile must be connected.\n\n" +
-		promptStyle.Render("domain:") + "\n" + m.nameInput.View() + "\n\n" +
-		fmt.Sprintf("also www: %s", wwwState)
-	var errLine string
-	if m.err != "" {
-		errLine = "\nError: " + m.err + "\n"
-	}
-	help := helpStyle.Render("[enter] Resolve & pin  [ctrl+w] Toggle www  [esc] Back")
+	indent := strings.Repeat(" ", 16)
+	body := "Send a host's traffic through the tunnel.\n\n" +
+		keyStyle.Render(padRight("example.com", 16)) + "resolved now via tunnel DNS and pinned to that IP\n" +
+		indent + "(profile must be connected)\n" +
+		keyStyle.Render(padRight("*.example.com", 16)) + "every subdomain resolves via tunnel DNS when used,\n" +
+		indent + "and each one's own IP is routed (apex not included)\n\n" +
+		promptStyle.Render("Domain:") + "\n" + m.nameInput.View() + "\n\n" +
+		labelStyle.Render("also pin www.<domain>: ") + wwwState
+	errLine := m.messages()
+	help := m.help("[enter] Add  [ctrl+w] Toggle www  [esc] Back")
 	return header + "\n\n" + body + errLine + "\n\n" + help
 }
 
@@ -754,57 +758,30 @@ func (m model) viewEditSplit() string {
 	hint := fmt.Sprintf("Current: mode=%s  preset=%s\n", mode, presetName) +
 		"Select Mode: include / Mode: exclude, or a bypass preset, then press enter.\n" +
 		"Shortcuts: [i] include  [x] exclude  [1] ir  [0] none  [m] manage custom presets"
-	var errLine string
-	if m.err != "" {
-		errLine = "\nError: " + m.err + "\n"
-	}
-	if m.notice != "" {
-		errLine += "\n" + m.notice + "\n"
-	}
-	help := helpStyle.Render("[enter] Apply  [i]/[x] Mode  [m] Presets  [esc] Back")
+	errLine := m.messages()
+	help := m.help("[enter] Apply  [i]/[x] Mode  [m] Presets  [esc] Back")
 	return header + "\n" + hint + "\n\n" + m.editList.View() + errLine + "\n" + help
 }
 
 func (m model) viewEditDNS() string {
-	header := titleStyle.Render(fmt.Sprintf("System DNS — %s", m.editProfile))
-	override, servers := "off", "1.1.1.1 (default)"
+	header := titleStyle.Render("DNS — " + m.editProfile)
+	override, servers, effect := "off", "1.1.1.1 (default)", ""
 	if p, err := profile.Load(m.editProfile); err == nil {
-		if p.OverrideSystemDNS {
-			override = "on"
-		}
+		override = onOff(p.OverrideSystemDNS)
 		if len(p.DNS) > 0 {
 			servers = strings.Join(p.DNS, ", ")
 		} else {
 			servers = p.UpstreamDNSHost() + " (default)"
 		}
+		effect = p.DNSBehavior()
 	}
-	body := fmt.Sprintf(`Current: override=%s  upstream=%s
-
-When override is on, all system DNS goes through the tunnel (fixes ISP
-filtering like youtube.com → 10.10.34.35).
-
-`, override, servers)
+	body := kv("Override", override) + kv("Tunnel DNS", servers) + kv("Effect", effect) + "\n" +
+		labelStyle.Render("on:  all system DNS goes through the tunnel (beats ISP filtering).") + "\n" +
+		labelStyle.Render("off: your normal DNS is untouched; tunnel DNS only resolves pinned hosts.") + "\n\n"
 	if m.nameInput.Focused() {
-		body += promptStyle.Render("DNS servers:") + "\n" + m.nameInput.View() + "\n"
-		help := helpStyle.Render("[enter] Save & enable override  [esc] Cancel")
-		var errLine string
-		if m.err != "" {
-			errLine = "\nError: " + m.err + "\n"
-		}
-		return header + "\n\n" + body + errLine + "\n" + help
+		body += promptStyle.Render("Tunnel DNS servers (space or comma separated):") + "\n" + m.nameInput.View() + "\n"
+		return header + "\n\n" + body + m.messages() + "\n" + m.help("[enter] Save  [esc] Cancel")
 	}
-	body += `  [o]  Override on
-  [f]  Override off
-  [s]  Set upstream DNS servers (also enables override)
-  [c]  Clear servers (fallback 1.1.1.1)
-`
-	var errLine string
-	if m.err != "" {
-		errLine = "\nError: " + m.err + "\n"
-	}
-	if m.notice != "" {
-		errLine += "\n" + m.notice + "\n"
-	}
-	help := helpStyle.Render("[esc] Back")
-	return header + "\n\n" + body + errLine + "\n" + help
+	help := m.help("[o] Override on  [f] Override off  [s] Set tunnel DNS servers  [c] Reset servers to 1.1.1.1  [esc] Back")
+	return header + "\n\n" + body + m.messages() + "\n" + help
 }
