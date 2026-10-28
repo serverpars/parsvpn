@@ -209,6 +209,7 @@ Profiles live in `/etc/parsvpn/profiles/<name>.json` with mode `0600`.
 - **`split_tunnel.mode: "include"`** — `ip_ranges` go through the tunnel. When importing a `.conf`, `ip_ranges` is filled from the peer's `AllowedIPs`, with `0.0.0.0/0` and `::/0` dropped so imports stay split-only.
 - **`split_tunnel.mode: "exclude"`** — everything goes through the tunnel except `ip_ranges` plus `bypass_preset`. WireGuard `AllowedIPs` are forced to `0.0.0.0/0`, and the peer endpoint is always bypassed. Inbound connections arriving on other interfaces are conntrack-marked (`fwmark 0x5192`) so their replies stay on the main table.
 - **`override_system_dns: true`** — all system DNS goes through the embedded proxy to `dns` (or `1.1.1.1`).
+- **`peers[].persistent_keepalive`** — seconds; omitted or `0` means 25 s so an idle tunnel keeps handshaking, and a negative value (e.g. `-1`) turns it off. Imported `.conf` files with `PersistentKeepalive = 0` or `off` are imported as off. `parsvpn status` shows the effective value.
 
 </details>
 

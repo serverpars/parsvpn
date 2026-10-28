@@ -704,6 +704,7 @@ func (d *Daemon) statusLocked() ipc.StatusPayload {
 	st.Userspace = d.wg != nil && d.wg.Userspace()
 	if len(d.active.Peers) > 0 {
 		st.Endpoint = d.active.Peers[0].Endpoint
+		st.Keepalive = d.active.Peers[0].KeepaliveLabel()
 	}
 	for _, o := range d.active.SplitTunnel.HostOverrides {
 		if profile.IsDynamicOverride(o) {

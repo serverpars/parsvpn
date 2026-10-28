@@ -28,6 +28,12 @@ var (
 )
 
 func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:     "parsvpn",
 		Short:   "ParsVPN — isolated WireGuard client for Linux servers",
@@ -54,10 +60,20 @@ func main() {
 		cmdTraffic(),
 		cmdUpdate(),
 		cmdUninstall(),
+		cmdVersion(),
 	)
+	return root
+}
 
-	if err := root.Execute(); err != nil {
-		os.Exit(1)
+// cmdVersion mirrors --version for scripts that call `parsvpn version`.
+func cmdVersion() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print the ParsVPN version",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Fprintf(cmd.OutOrStdout(), "parsvpn %s\n", cmd.Root().Version)
+		},
 	}
 }
 
@@ -137,8 +153,8 @@ func cmdStatus() *cobra.Command {
 					boolOnOff(st.AutoConnect), orDash(st.AutostartProfile), boolOnOff(st.AutoUpdate))
 				return nil
 			}
-			fmt.Printf("status: active\nprofile: %s\ninterface: %s\naddress: %s\nendpoint: %s\nhandshake: %s\nrx: %d\ntx: %d\nsplit: %s\ndns: override=%s servers=%s\nautostart: %s\nreconnects as: %s\nautoupdate: %s\n",
-				st.Profile, st.Interface, st.Address, st.Endpoint, st.Handshake, st.RxBytes, st.TxBytes, strings.Join(st.SplitIPs, ", "),
+			fmt.Printf("status: active\nprofile: %s\ninterface: %s\naddress: %s\nendpoint: %s\nhandshake: %s\nkeepalive: %s\nrx: %d\ntx: %d\nsplit: %s\ndns: override=%s servers=%s\nautostart: %s\nreconnects as: %s\nautoupdate: %s\n",
+				st.Profile, st.Interface, st.Address, st.Endpoint, st.Handshake, orDash(st.Keepalive), st.RxBytes, st.TxBytes, strings.Join(st.SplitIPs, ", "),
 				boolOnOff(st.DNSOverride), dnsServersDisplay(st.DNSServers),
 				boolOnOff(st.AutoConnect), orDash(st.AutostartProfile), boolOnOff(st.AutoUpdate))
 			if len(st.Overrides) > 0 {

@@ -280,7 +280,7 @@ func buildConfig(p *profile.Profile) (wgtypes.Config, error) {
 			}
 			pc.Endpoint = udp
 		}
-		ka := time.Duration(peer.PersistentKeepalive) * time.Second
+		ka := time.Duration(peer.EffectiveKeepalive()) * time.Second
 		pc.PersistentKeepaliveInterval = &ka
 		for _, cidr := range p.PeerAllowedIPsForConfigure(peer) {
 			_, ipnet, err := net.ParseCIDR(cidr)

@@ -4,7 +4,7 @@ import "time"
 
 const (
 	AppName    = "parsvpn"
-	Version    = "2.0.1"
+	Version    = "2.0.2"
 	IfaceName  = "pv-tun0"
 	RouteTable = 51920
 	// FwMark marks conntrack entries for inbound connections that arrived on a
@@ -65,6 +65,10 @@ const (
 	RekeyBackoffSec = 120
 	// ProbeTimeoutSec bounds each probe dial; targets are dialed in parallel.
 	ProbeTimeoutSec = 3
+	// DefaultPersistentKeepaliveSec applies when a peer leaves
+	// persistent_keepalive unset. Without it an idle tunnel stops handshaking
+	// and the health loop sees it as stale.
+	DefaultPersistentKeepaliveSec = 25
 
 	// GitHub release source for update checks / autopilot.
 	GitHubOwner = "serverpars"

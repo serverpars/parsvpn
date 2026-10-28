@@ -37,6 +37,7 @@ type StatusPayload struct {
 	Endpoint         string    `json:"endpoint,omitempty"`
 	Address          string    `json:"address,omitempty"`
 	Handshake        string    `json:"handshake,omitempty"`
+	Keepalive        string    `json:"keepalive,omitempty"`
 	RxBytes          int64     `json:"rx_bytes"`
 	TxBytes          int64     `json:"tx_bytes"`
 	SplitIPs         []string  `json:"split_ips,omitempty"`

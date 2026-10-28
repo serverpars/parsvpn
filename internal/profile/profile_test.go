@@ -678,3 +678,40 @@ func TestDynamicWildcardPin(t *testing.T) {
 		t.Fatalf("exact pins must be routing-only domains, got %s", got)
 	}
 }
+
+func TestEffectiveKeepalive(t *testing.T) {
+	cases := []struct {
+		name  string
+		set   int
+		want  int
+		label string
+	}{
+		{"omitted uses default", 0, 25, "25s (default)"},
+		{"explicit value kept", 40, 40, "40s"},
+		{"explicit 25 kept", 25, 25, "25s"},
+		{"negative disables", -1, 0, "off"},
+	}
+	for _, c := range cases {
+		peer := Peer{PersistentKeepalive: c.set}
+		if got := peer.EffectiveKeepalive(); got != c.want {
+			t.Errorf("%s: EffectiveKeepalive = %d, want %d", c.name, got, c.want)
+		}
+		if got := peer.KeepaliveLabel(); got != c.label {
+			t.Errorf("%s: KeepaliveLabel = %q, want %q", c.name, got, c.label)
+		}
+	}
+}
+
+func TestImportKeepaliveExplicitOffDisables(t *testing.T) {
+	for _, val := range []string{"0", "off", "OFF"} {
+		content := "[Interface]\nPrivateKey = xKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\nAddress = 10.200.0.2/32\n\n" +
+			"[Peer]\nPublicKey = bmaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\nAllowedIPs = 10.10.0.0/16\nPersistentKeepalive = " + val + "\n"
+		p, err := ImportWireGuardConfContent(content, "ka")
+		if err != nil {
+			t.Fatalf("%s: %v", val, err)
+		}
+		if got := p.Peers[0].EffectiveKeepalive(); got != 0 {
+			t.Fatalf("PersistentKeepalive = %s: effective %d, want disabled", val, got)
+		}
+	}
+}

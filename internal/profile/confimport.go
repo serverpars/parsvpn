@@ -104,9 +104,17 @@ func ImportWireGuardConfReader(r io.Reader, name string) (*Profile, error) {
 			case "endpoint":
 				curPeer.Endpoint = val
 			case "persistentkeepalive":
+				// wg-quick's explicit 0/off means disabled; in a profile 0 means default.
+				if strings.EqualFold(val, "off") {
+					curPeer.PersistentKeepalive = -1
+					break
+				}
 				n, err := strconv.Atoi(val)
 				if err != nil {
 					return nil, fmt.Errorf("PersistentKeepalive: %w", err)
+				}
+				if n == 0 {
+					n = -1
 				}
 				curPeer.PersistentKeepalive = n
 			case "allowedips":

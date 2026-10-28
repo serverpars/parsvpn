@@ -57,13 +57,38 @@ type SplitTunnel struct {
 	HostOverrides []HostOverride `json:"host_overrides"`
 }
 
-// Peer is a WireGuard peer.
+// Peer is a WireGuard peer. PersistentKeepalive is in seconds: 0/omitted uses
+// constants.DefaultPersistentKeepaliveSec, a negative value disables it.
 type Peer struct {
 	PublicKey           string   `json:"public_key"`
 	PresharedKey        string   `json:"preshared_key,omitempty"`
 	Endpoint            string   `json:"endpoint,omitempty"`
 	PersistentKeepalive int      `json:"persistent_keepalive,omitempty"`
 	AllowedIPs          []string `json:"allowed_ips"`
+}
+
+// EffectiveKeepalive returns the keepalive applied to WireGuard in seconds;
+// 0 means disabled.
+func (peer Peer) EffectiveKeepalive() int {
+	switch {
+	case peer.PersistentKeepalive < 0:
+		return 0
+	case peer.PersistentKeepalive == 0:
+		return constants.DefaultPersistentKeepaliveSec
+	}
+	return peer.PersistentKeepalive
+}
+
+// KeepaliveLabel describes EffectiveKeepalive for status output.
+func (peer Peer) KeepaliveLabel() string {
+	ka := peer.EffectiveKeepalive()
+	switch {
+	case ka == 0:
+		return "off"
+	case peer.PersistentKeepalive == 0:
+		return fmt.Sprintf("%ds (default)", ka)
+	}
+	return fmt.Sprintf("%ds", ka)
 }
 
 // Profile is the on-disk JSON representation under /etc/parsvpn/profiles/.
