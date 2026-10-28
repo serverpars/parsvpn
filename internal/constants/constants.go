@@ -4,7 +4,7 @@ import "time"
 
 const (
 	AppName    = "parsvpn"
-	Version    = "2.0.0"
+	Version    = "2.0.1"
 	IfaceName  = "pv-tun0"
 	RouteTable = 51920
 	// FwMark marks conntrack entries for inbound connections that arrived on a
@@ -59,6 +59,12 @@ const (
 
 	HandshakePollIntervalSec = 15
 	HandshakeStaleSec        = 120
+	// RekeyBackoffSec is the minimum gap after a (re)configure or stale-tunnel
+	// probe/rekey before the health loop acts again; a zero handshake inside it
+	// is a handshake still in progress, not a dead tunnel.
+	RekeyBackoffSec = 120
+	// ProbeTimeoutSec bounds each probe dial; targets are dialed in parallel.
+	ProbeTimeoutSec = 3
 
 	// GitHub release source for update checks / autopilot.
 	GitHubOwner = "serverpars"

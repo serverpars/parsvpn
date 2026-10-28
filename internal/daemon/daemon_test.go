@@ -4,7 +4,9 @@ import (
 	"net"
 	"reflect"
 	"testing"
+	"time"
 
+	"github.com/serverpars/parsvpn/internal/constants"
 	"github.com/serverpars/parsvpn/internal/profile"
 )
 
@@ -52,5 +54,44 @@ func TestDynamicRoutesBounded(t *testing.T) {
 	key := net.IPv4(10, byte(last>>16), byte(last>>8), byte(last)).String()
 	if _, ok := d.dyn.seen[key]; !ok {
 		t.Fatalf("latest IP %s was evicted", key)
+	}
+}
+
+func TestHealthStateStale(t *testing.T) {
+	backoff := time.Duration(constants.RekeyBackoffSec) * time.Second
+	staleAge := time.Duration(constants.HandshakeStaleSec)*time.Second + time.Second
+	t0 := time.Unix(1_700_000_000, 0)
+	p := &profile.Profile{}
+	var h healthState
+
+	if h.stale(p, t0, 100, time.Time{}) {
+		t.Fatal("first sight of a session must not be stale")
+	}
+	// Zero handshake right after Up/rekey is a handshake in progress.
+	if h.stale(p, t0.Add(15*time.Second), 100, time.Time{}) {
+		t.Fatal("zero handshake inside the backoff window must not be stale")
+	}
+	// Past the window, a missing handshake with flat rx is dead.
+	now := t0.Add(backoff)
+	if !h.stale(p, now, 100, time.Time{}) {
+		t.Fatal("zero handshake past the backoff window must be stale")
+	}
+	h.acted(now)
+	if h.stale(p, now.Add(15*time.Second), 100, now.Add(-staleAge)) {
+		t.Fatal("must not act again within the backoff window after a rekey")
+	}
+	now = now.Add(backoff)
+	if h.stale(p, now, 200, now.Add(-staleAge)) {
+		t.Fatal("rising rx must suppress the rekey")
+	}
+	if !h.stale(p, now.Add(15*time.Second), 200, now.Add(-staleAge)) {
+		t.Fatal("old handshake with flat rx must be stale")
+	}
+	if h.stale(p, now.Add(30*time.Second), 200, now) {
+		t.Fatal("fresh handshake must not be stale")
+	}
+	// Reload installs a new session profile: backoff restarts.
+	if h.stale(&profile.Profile{}, now.Add(45*time.Second), 0, time.Time{}) {
+		t.Fatal("a new session must restart the backoff window")
 	}
 }

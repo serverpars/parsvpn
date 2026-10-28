@@ -739,6 +739,7 @@ func (d *Daemon) statusLocked() ipc.StatusPayload {
 func (d *Daemon) healthLoop() {
 	t := time.NewTicker(time.Duration(constants.HandshakePollIntervalSec) * time.Second)
 	defer t.Stop()
+	var h healthState
 	for {
 		select {
 		case <-d.stopCh:
@@ -749,22 +750,62 @@ func (d *Daemon) healthLoop() {
 			ctrl := d.wg
 			d.mu.Unlock()
 			if p == nil || ctrl == nil {
+				h = healthState{}
 				continue
 			}
-			age, err := ctrl.PeerHandshakeAge()
+			rx, _, hs, err := ctrl.Stats()
 			if err != nil {
 				continue
 			}
-			if age > time.Duration(constants.HandshakeStaleSec)*time.Second {
-				log.Printf("handshake stale (%s) — probing / rekey", age.Round(time.Second))
-				if !probeTunnel(p) {
-					d.mu.Lock()
-					_ = ctrl.Rekey(p)
-					d.mu.Unlock()
-				}
+			now := time.Now()
+			if !h.stale(p, now, rx, hs) {
+				continue
 			}
+			if hs.IsZero() {
+				log.Printf("no handshake within %ds — probing / rekey", constants.RekeyBackoffSec)
+			} else {
+				log.Printf("handshake stale (%s) — probing / rekey", now.Sub(hs).Round(time.Second))
+			}
+			if !probeTunnel(p) {
+				d.mu.Lock()
+				// Skip if Up/Reload swapped the session while we probed.
+				if d.active == p && d.wg == ctrl {
+					_ = ctrl.Rekey(p)
+				}
+				d.mu.Unlock()
+			}
+			h.acted(now)
 		}
 	}
+}
+
+// healthState decides when the health loop treats the tunnel as dead.
+type healthState struct {
+	session *profile.Profile // d.active when the state was last reset
+	since   time.Time        // session start or last probe/rekey
+	lastRx  int64
+}
+
+// stale reports whether the tunnel looks dead: received bytes aren't rising,
+// the last probe/rekey (or Up/Reload) is at least RekeyBackoffSec ago, and the
+// handshake is older than HandshakeStaleSec or still missing after that window.
+// Up/Reload install a new session profile, which restarts the backoff window.
+func (h *healthState) stale(p *profile.Profile, now time.Time, rx int64, handshake time.Time) bool {
+	if p != h.session {
+		*h = healthState{session: p, since: now, lastRx: rx}
+		return false
+	}
+	rising := rx > h.lastRx
+	h.lastRx = rx
+	if rising || now.Sub(h.since) < time.Duration(constants.RekeyBackoffSec)*time.Second {
+		return false
+	}
+	return handshake.IsZero() || now.Sub(handshake) > time.Duration(constants.HandshakeStaleSec)*time.Second
+}
+
+// acted starts a new backoff window after a probe or rekey.
+func (h *healthState) acted(now time.Time) {
+	h.since = now
 }
 
 func (d *Daemon) healLoop() {
@@ -963,25 +1004,41 @@ func firstDNS(p *profile.Profile) string {
 	return dnseng.UpstreamAddr(p.UpstreamDNSHost())
 }
 
+// maxProbeTargets caps the parallel dials of one probe.
+const maxProbeTargets = 8
+
+// probeTunnel reports whether any pinned host answers TCP 443 through the
+// tunnel. Port 53 is not probed: edges commonly drop it silently. Each target
+// gets its own timeout and all are dialed in parallel, so one black-holed IP
+// can't starve the rest.
 func probeTunnel(p *profile.Profile) bool {
-	// Best-effort TCP connect to first host override IP or first split /32-ish peer gateway.
-	targets := []string{}
+	var targets []string
+	seen := map[string]bool{}
 	for _, o := range p.SplitTunnel.HostOverrides {
-		// Dynamic wildcards have no IP; ":53" would dial localhost and report
+		// Dynamic wildcards have no IP; ":443" would dial localhost and report
 		// a dead tunnel as healthy.
-		if net.ParseIP(o.IP) == nil {
+		if net.ParseIP(o.IP) == nil || seen[o.IP] {
 			continue
 		}
-		targets = append(targets, net.JoinHostPort(o.IP, "53"))
+		seen[o.IP] = true
 		targets = append(targets, net.JoinHostPort(o.IP, "443"))
+		if len(targets) == maxProbeTargets {
+			break
+		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	d := net.Dialer{}
+	timeout := time.Duration(constants.ProbeTimeoutSec) * time.Second
+	ok := make(chan bool, len(targets))
 	for _, addr := range targets {
-		conn, err := d.DialContext(ctx, "tcp", addr)
-		if err == nil {
-			_ = conn.Close()
+		go func() {
+			conn, err := net.DialTimeout("tcp", addr, timeout)
+			if err == nil {
+				_ = conn.Close()
+			}
+			ok <- err == nil
+		}()
+	}
+	for range targets {
+		if <-ok {
 			return true
 		}
 	}

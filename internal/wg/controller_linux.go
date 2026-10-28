@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/serverpars/parsvpn/internal/constants"
@@ -22,12 +23,12 @@ import (
 // Controller configures WireGuard on pv-tun0 via the kernel module when present,
 // otherwise starts a userspace wireguard-go device.
 type Controller struct {
-	client     *wgctrl.Client
-	device     *device.Device
-	tunDev     tun.Device
-	uapiLn     net.Listener
-	uapiStop   chan struct{}
-	userspace  bool
+	client    *wgctrl.Client
+	device    *device.Device
+	tunDev    tun.Device
+	uapiLn    net.Listener
+	uapiStop  chan struct{}
+	userspace bool
 }
 
 func New() (*Controller, error) {
@@ -131,6 +132,9 @@ func (c *Controller) StartUserspace(mtu int) error {
 // Listen-port collisions (e.g. wg0 on 51820) are resolved here so every caller
 // (Up, Reload, Rekey) is protected — conflicting ports are omitted so the
 // current ephemeral bind is kept / the kernel picks one.
+//
+// Peers are replaced only when the set of peer keys changed; otherwise they are
+// updated in place, which keeps the live session and handshake.
 func (c *Controller) Configure(p *profile.Profile) error {
 	if p == nil {
 		return fmt.Errorf("nil profile")
@@ -141,20 +145,17 @@ func (c *Controller) Configure(p *profile.Profile) error {
 	} else {
 		eff.ListenPort = port
 	}
+	cfg, err := buildConfig(&eff)
+	if err != nil {
+		return err
+	}
+	cfg.ReplacePeers = c.peerSetChanged(cfg.Peers)
 
 	if c.userspace {
-		uapi, err := cfgToUAPI(&eff)
-		if err != nil {
-			return err
-		}
-		if err := c.device.IpcSet(uapi); err != nil {
-			if eff.ListenPort > 0 && neteng.IsAddrInUse(err) {
-				eff.ListenPort = 0
-				uapi, err = cfgToUAPI(&eff)
-				if err != nil {
-					return err
-				}
-				if err = c.device.IpcSet(uapi); err != nil {
+		if err := c.device.IpcSet(cfgToUAPI(cfg)); err != nil {
+			if cfg.ListenPort != nil && neteng.IsAddrInUse(err) {
+				cfg.ListenPort = nil
+				if err = c.device.IpcSet(cfgToUAPI(cfg)); err != nil {
 					return fmt.Errorf("userspace wg ipc: %w", err)
 				}
 			} else {
@@ -164,17 +165,9 @@ func (c *Controller) Configure(p *profile.Profile) error {
 		c.device.Up()
 		return nil
 	}
-	cfg, err := buildConfig(&eff)
-	if err != nil {
-		return err
-	}
 	if err := c.client.ConfigureDevice(constants.IfaceName, cfg); err != nil {
-		if eff.ListenPort > 0 && neteng.IsAddrInUse(err) {
-			eff.ListenPort = 0
-			cfg, err = buildConfig(&eff)
-			if err != nil {
-				return err
-			}
+		if cfg.ListenPort != nil && neteng.IsAddrInUse(err) {
+			cfg.ListenPort = nil
 			if err = c.client.ConfigureDevice(constants.IfaceName, cfg); err != nil {
 				return fmt.Errorf("configure kernel wg: %w", err)
 			}
@@ -185,7 +178,21 @@ func (c *Controller) Configure(p *profile.Profile) error {
 	return nil
 }
 
-// Rekey re-applies peer config to force a fresh handshake cycle.
+// peerSetChanged reads the device's current peers; if they can't be read the
+// peers are replaced.
+func (c *Controller) peerSetChanged(desired []wgtypes.PeerConfig) bool {
+	if c.client == nil {
+		return true
+	}
+	dev, err := c.client.Device(constants.IfaceName)
+	if err != nil {
+		return true
+	}
+	return peerSetChanged(dev.Peers, desired)
+}
+
+// Rekey re-applies the peer config in place: it restores the configured
+// endpoint and keepalive without wiping the live session.
 func (c *Controller) Rekey(p *profile.Profile) error {
 	return c.Configure(p)
 }
@@ -256,13 +263,16 @@ func buildConfig(p *profile.Profile) (wgtypes.Config, error) {
 			PublicKey:         pub,
 			ReplaceAllowedIPs: true,
 		}
+		// PSK and keepalive are always set (zero clears them) so an in-place
+		// update leaves nothing stale behind.
+		var psk wgtypes.Key
 		if peer.PresharedKey != "" {
-			psk, err := wgtypes.ParseKey(peer.PresharedKey)
+			psk, err = wgtypes.ParseKey(peer.PresharedKey)
 			if err != nil {
 				return wgtypes.Config{}, err
 			}
-			pc.PresharedKey = &psk
 		}
+		pc.PresharedKey = &psk
 		if peer.Endpoint != "" {
 			udp, err := net.ResolveUDPAddr("udp", peer.Endpoint)
 			if err != nil {
@@ -270,10 +280,8 @@ func buildConfig(p *profile.Profile) (wgtypes.Config, error) {
 			}
 			pc.Endpoint = udp
 		}
-		if peer.PersistentKeepalive > 0 {
-			ka := time.Duration(peer.PersistentKeepalive) * time.Second
-			pc.PersistentKeepaliveInterval = &ka
-		}
+		ka := time.Duration(peer.PersistentKeepalive) * time.Second
+		pc.PersistentKeepaliveInterval = &ka
 		for _, cidr := range p.PeerAllowedIPsForConfigure(peer) {
 			_, ipnet, err := net.ParseCIDR(cidr)
 			if err != nil {
@@ -291,43 +299,35 @@ func buildConfig(p *profile.Profile) (wgtypes.Config, error) {
 	}, nil
 }
 
-func cfgToUAPI(p *profile.Profile) (string, error) {
-	priv, err := wgtypes.ParseKey(p.PrivateKey)
-	if err != nil {
-		return "", err
+// cfgToUAPI renders cfg in wireguard-go's UAPI format.
+func cfgToUAPI(cfg wgtypes.Config) string {
+	var b strings.Builder
+	if cfg.PrivateKey != nil {
+		fmt.Fprintf(&b, "private_key=%x\n", cfg.PrivateKey[:])
 	}
-	out := fmt.Sprintf("private_key=%x\n", priv[:])
-	if p.ListenPort > 0 {
-		out += fmt.Sprintf("listen_port=%d\n", p.ListenPort)
+	if cfg.ListenPort != nil {
+		fmt.Fprintf(&b, "listen_port=%d\n", *cfg.ListenPort)
 	}
-	out += "replace_peers=true\n"
-	for _, peer := range p.Peers {
-		pub, err := wgtypes.ParseKey(peer.PublicKey)
-		if err != nil {
-			return "", err
+	if cfg.ReplacePeers {
+		b.WriteString("replace_peers=true\n")
+	}
+	for _, pc := range cfg.Peers {
+		fmt.Fprintf(&b, "public_key=%x\n", pc.PublicKey[:])
+		if pc.PresharedKey != nil {
+			fmt.Fprintf(&b, "preshared_key=%x\n", pc.PresharedKey[:])
 		}
-		out += fmt.Sprintf("public_key=%x\n", pub[:])
-		if peer.PresharedKey != "" {
-			psk, err := wgtypes.ParseKey(peer.PresharedKey)
-			if err != nil {
-				return "", err
-			}
-			out += fmt.Sprintf("preshared_key=%x\n", psk[:])
+		if pc.Endpoint != nil {
+			fmt.Fprintf(&b, "endpoint=%s\n", pc.Endpoint.String())
 		}
-		if peer.Endpoint != "" {
-			// UAPI only accepts IP:port; resolve hostnames like the kernel path.
-			udp, err := net.ResolveUDPAddr("udp", peer.Endpoint)
-			if err != nil {
-				return "", fmt.Errorf("endpoint %s: %w", peer.Endpoint, err)
-			}
-			out += fmt.Sprintf("endpoint=%s\n", udp.String())
+		if pc.PersistentKeepaliveInterval != nil {
+			fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", int(pc.PersistentKeepaliveInterval.Seconds()))
 		}
-		if peer.PersistentKeepalive > 0 {
-			out += fmt.Sprintf("persistent_keepalive_interval=%d\n", peer.PersistentKeepalive)
+		if pc.ReplaceAllowedIPs {
+			b.WriteString("replace_allowed_ips=true\n")
 		}
-		for _, cidr := range p.PeerAllowedIPsForConfigure(peer) {
-			out += fmt.Sprintf("allowed_ip=%s\n", cidr)
+		for _, ipn := range pc.AllowedIPs {
+			fmt.Fprintf(&b, "allowed_ip=%s\n", ipn.String())
 		}
 	}
-	return out, nil
+	return b.String()
 }
