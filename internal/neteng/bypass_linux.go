@@ -116,6 +116,11 @@ func (e *Engine) applyBypassExceptionRoutes(cidrs []string) error {
 		if err := netlink.RouteReplace(route); err != nil {
 			return fmt.Errorf("bypass exception route %s: %w", c, err)
 		}
+		spec := RouteSpec{Dst: canonCIDR(dst), LinkIndex: linkIndex}
+		if gw != nil {
+			spec.Gw = gw.String()
+		}
+		e.recordRoute(spec)
 	}
 	return nil
 }
@@ -172,6 +177,7 @@ func (e *Engine) applyBypassRuleTo(cidr string, pref int) error {
 	if err := netlink.RuleAdd(rule); err != nil {
 		return fmt.Errorf("bypass rule %s: %w", cidr, err)
 	}
+	e.recordRule(rule)
 	return nil
 }
 

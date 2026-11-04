@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/serverpars/parsvpn/internal/constants"
@@ -50,8 +51,50 @@ type StatusPayload struct {
 	AutoUpdate       bool      `json:"auto_update,omitempty"`
 	Healing          bool      `json:"healing,omitempty"`
 	Userspace        bool      `json:"userspace,omitempty"`
+	Routing          *Routing  `json:"routing,omitempty"`
 	Error            string    `json:"error,omitempty"`
 	UpdatedAt        time.Time `json:"updated_at,omitempty"`
+}
+
+// Routing reports whether ParsVPN's policy rules and table routes are all
+// installed. Something else deleting them (systemd-networkd restart,
+// `ip rule flush`) silently sends tunnel traffic out the default route.
+type Routing struct {
+	RulesExpected   int       `json:"rules_expected"`
+	RulesInstalled  int       `json:"rules_installed"`
+	RoutesExpected  int       `json:"routes_expected"`
+	RoutesInstalled int       `json:"routes_installed"`
+	Error           string    `json:"error,omitempty"`
+	Repairs         int       `json:"repairs,omitempty"`
+	LastRepair      time.Time `json:"last_repair,omitempty"`
+	LastRepairNote  string    `json:"last_repair_note,omitempty"`
+}
+
+// Degraded returns why routing is unhealthy, or "" when every expected rule
+// and route is installed.
+func (r *Routing) Degraded() string {
+	if r == nil {
+		return ""
+	}
+	if r.Error != "" {
+		return "routing state unknown: " + r.Error
+	}
+	var parts []string
+	if r.RulesInstalled < r.RulesExpected {
+		parts = append(parts, fmt.Sprintf("policy rules missing (%d/%d)", r.RulesExpected-r.RulesInstalled, r.RulesExpected))
+	}
+	if r.RoutesInstalled < r.RoutesExpected {
+		parts = append(parts, fmt.Sprintf("table routes missing (%d/%d)", r.RoutesExpected-r.RoutesInstalled, r.RoutesExpected))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// Summary is the one-line routing state, e.g. "10/10 rules, 10/10 routes installed".
+func (r *Routing) Summary() string {
+	if r == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%d/%d rules, %d/%d routes installed", r.RulesInstalled, r.RulesExpected, r.RoutesInstalled, r.RoutesExpected)
 }
 
 // Response wraps command results.

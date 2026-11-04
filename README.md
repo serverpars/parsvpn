@@ -27,7 +27,7 @@ ParsVPN imports standard WireGuard `.conf` files and runs them on an isolated in
 | ↩️ **Safe full-tunnel** | In exclude mode, replies to inbound connections stay on the main table — SSH, CDN and reverse-proxy traffic keeps working. |
 | 🌐 **Built-in DNS** | Embedded resolver on `127.0.0.199:53` for system DNS override and per-domain host pins (wildcards supported). |
 | 🖥️ **CLI + TUI** | Scriptable commands with `--json` output, plus an interactive dashboard. |
-| 🩺 **Self-healing** | Handshake health checks with automatic rekey, auto-rebuild if the interface disappears, reconnect after reboot. |
+| 🩺 **Self-healing** | Handshake health checks with automatic rekey, auto-rebuild if the interface disappears, reconnect after reboot. Policy rules or routes deleted by another tool (e.g. a `systemd-networkd` restart) are re-installed within a second. |
 | 🔄 **Auto-updates** | Installs new GitHub releases unattended (opt-out available). |
 | 📦 **Runs anywhere** | Static ELF (`CGO_ENABLED=0`) for CentOS 7, AlmaLinux 8–9 and Ubuntu 20.04+. Kernel WireGuard when available, userspace fallback when not. |
 
@@ -222,6 +222,14 @@ Profiles live in `/etc/parsvpn/profiles/<name>.json` with mode `0600`.
 
 `parsvpn down` clears the saved auto-start profile. To update manually: `parsvpn update --check`, then `sudo parsvpn update`.
 
+### Routing health
+
+Something other than ParsVPN can delete its policy rules while the tunnel stays up — most commonly `systemd-networkd`, which by default removes every rule it did not create when it (re)starts, e.g. during unattended upgrades. Traffic then silently leaves via the default route. ParsVPN guards against this:
+
+- The daemon watches for deleted rules/routes (netlink) and re-checks every 15 s, re-installing only its own missing entries and logging one line per repair, e.g. `policy rules missing (10/10) — restored`.
+- `parsvpn status` shows `routing: 10/10 rules, 10/10 routes installed`, `health: ok|degraded — …` and past repairs. **Exit status:** `0` healthy or inactive, `1` error (daemon unreachable), `2` active but degraded. `--json` includes a `routing` object and uses the same exit status.
+- On hosts with `systemd-networkd`, the daemon writes `/etc/systemd/networkd.conf.d/50-parsvpn.conf` (`ManageForeignRoutingPolicyRules=no`) as defence in depth. It takes effect at networkd's next start; ParsVPN never restarts networkd. `parsvpn uninstall` removes it.
+
 ### Isolation map
 
 | Component | Value |
@@ -229,10 +237,11 @@ Profiles live in `/etc/parsvpn/profiles/<name>.json` with mode `0600`.
 | Interface | `pv-tun0` |
 | Routing table | `51920` |
 | Firewall mark | `0x5192` (exclude-mode return path) |
-| Rule priorities | `13990` (return path), `14000–16999` (split / bypass / catch-all) |
+| Rule priorities | `13990` (return path), `13991` (peer endpoint), `14000–16999` (split / bypass / catch-all) |
 | nftables | `inet parsvpn` (iptables fallback) |
 | Config | `/etc/parsvpn/` — `profiles/`, `presets/`, `config.json` |
 | Socket / lock | `/var/run/parsvpn/daemon.sock`, `/var/run/parsvpn/daemon.lock` |
+| networkd drop-in | `/etc/systemd/networkd.conf.d/50-parsvpn.conf` (only if `systemd-networkd` is installed) |
 
 ## 🗑️ Uninstall
 

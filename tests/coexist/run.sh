@@ -8,6 +8,10 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 echo "==> Building Linux amd64 binary"
 mkdir -p "${ROOT}/dist"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "${ROOT}/dist/parsvpn-linux-amd64" "${ROOT}/cmd/parsvpn"
+echo "==> Building netlink test binaries"
+(cd "${ROOT}" &&
+  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -o dist/neteng.test ./internal/neteng &&
+  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -o dist/daemon.test ./internal/daemon)
 
 run_case() {
   local dockerfile="$1"
@@ -17,6 +21,7 @@ run_case() {
   docker build -t "${tag}" -f "${ROOT}/tests/coexist/${dockerfile}" "${ROOT}"
   docker run --rm --privileged --cap-add=NET_ADMIN \
     -e RIVAL="${rival}" \
+    -v "${ROOT}/dist:/dist:ro" \
     "${tag}" \
     bash /tests/coexist/run-inside.sh
 }

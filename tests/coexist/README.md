@@ -1,7 +1,10 @@
 # ParsVPN coexistence tests
 
 Smoke tests that ParsVPN’s isolated interface (`pv-tun0`), table (`51920`),
-and rule preferences (`15190–15199`) do not disturb simulated rival VPN clients.
+and rule preferences (`13990–16999`, see `internal/constants`) do not disturb
+simulated rival VPN clients. Each run also deletes ParsVPN's rules behind the
+daemon's back and checks they are restored (self-heal), then runs the
+`TestNetns*` netlink tests (`PARSVPN_NETNS_TESTS=1`) from `dist/*.test`.
 
 ## Prerequisites
 

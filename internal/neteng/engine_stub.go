@@ -15,17 +15,22 @@ type Engine struct {
 
 func New() *Engine { return &Engine{Iface: "pv-tun0", Table: 51920} }
 
-func (e *Engine) CleanupOrphans() error                              { return nil }
-func (e *Engine) EnsureKernelWireGuard() (bool, error)               { return false, errOS() }
-func (e *Engine) AssignAddress(string, int) error                    { return errOS() }
-func (e *Engine) ApplySplitRoutes([]string) error                    { return errOS() }
-func (e *Engine) ApplyExcludeRoutes([]string, string) error          { return errOS() }
-func (e *Engine) Teardown() error                                    { return nil }
-func (e *Engine) InterfaceIndex() (int, error)                       { return 0, errOS() }
-func (e *Engine) WatchLinkDeleted(<-chan struct{}, func()) error     { return errOS() }
-func (e *Engine) AddHostRoutes([]net.IP) error                       { return errOS() }
-func (e *Engine) DelHostRoutes([]net.IP)                             {}
-func (e *Engine) EnsureTableLookupRule() error                       { return errOS() }
+func (e *Engine) CleanupOrphans() error                          { return nil }
+func (e *Engine) EnsureKernelWireGuard() (bool, error)           { return false, errOS() }
+func (e *Engine) AssignAddress(string, int) error                { return errOS() }
+func (e *Engine) ApplySplitRoutes([]string) error                { return errOS() }
+func (e *Engine) ApplyExcludeRoutes([]string, string) error      { return errOS() }
+func (e *Engine) Teardown() error                                { return nil }
+func (e *Engine) InterfaceIndex() (int, error)                   { return 0, errOS() }
+func (e *Engine) WatchLinkDeleted(<-chan struct{}, func()) error { return errOS() }
+func (e *Engine) AddHostRoutes([]net.IP) error                   { return errOS() }
+func (e *Engine) DelHostRoutes([]net.IP)                         {}
+func (e *Engine) EnsureTableLookupRule() error                   { return errOS() }
+func (e *Engine) WatchRouting(<-chan struct{}, func()) error     { return errOS() }
+func (e *Engine) RoutingHealth() (RoutingHealth, error)          { return RoutingHealth{}, errOS() }
+func (e *Engine) Reconcile() (RepairResult, error) {
+	return RepairResult{Skipped: "not linux"}, nil
+}
 
 func AcquireLock(path string) (*os.File, error) {
 	if err := os.MkdirAll(dirOf(path), 0o700); err != nil {

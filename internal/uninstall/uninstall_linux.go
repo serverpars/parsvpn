@@ -14,6 +14,7 @@ import (
 	"github.com/serverpars/parsvpn/internal/dnseng"
 	"github.com/serverpars/parsvpn/internal/ipc"
 	"github.com/serverpars/parsvpn/internal/neteng"
+	"github.com/serverpars/parsvpn/internal/networkd"
 )
 
 // Options controls uninstall behavior.
@@ -61,6 +62,12 @@ func Run(opts Options) error {
 	// backup is deleted with the runtime / config directories.
 	if err := dnseng.RecoverResolvConf(); err != nil {
 		fmt.Println("warning: could not restore /etc/resolv.conf:", err)
+	}
+
+	// The daemon writes this at start on systemd-networkd hosts. It is only
+	// read at networkd's next start, so it is not restarted here either.
+	if err := networkd.RemoveDropIn(); err != nil {
+		fmt.Println("warning: could not remove", constants.NetworkdDropInPath+":", err)
 	}
 
 	unit := "/etc/systemd/system/" + constants.ServiceName + ".service"

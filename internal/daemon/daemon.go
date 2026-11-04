@@ -19,6 +19,7 @@ import (
 	"github.com/serverpars/parsvpn/internal/flowlog"
 	"github.com/serverpars/parsvpn/internal/ipc"
 	"github.com/serverpars/parsvpn/internal/neteng"
+	"github.com/serverpars/parsvpn/internal/networkd"
 	"github.com/serverpars/parsvpn/internal/preset"
 	"github.com/serverpars/parsvpn/internal/profile"
 	"github.com/serverpars/parsvpn/internal/update"
@@ -36,18 +37,21 @@ type Daemon struct {
 	lockFile         *os.File
 	stopCh           chan struct{}
 	healCh           chan struct{}
-	ignoreLinkDelete atomic.Bool // set during intentional teardown so watches don't re-heal
+	reconcileCh      chan struct{} // routing deletion seen; debounced in reconcileLoop
+	ignoreLinkDelete atomic.Bool   // set during intentional teardown so watches don't re-heal
 	watchStarted     atomic.Bool
 	healing          atomic.Bool
 	healingProfile   atomic.Value // string
 	dyn              dynRoutes
+	repairs          repairGuard // routing repairs; guarded by mu
 }
 
 func New() *Daemon {
 	d := &Daemon{
-		net:    neteng.New(),
-		stopCh: make(chan struct{}),
-		healCh: make(chan struct{}, 1),
+		net:         neteng.New(),
+		stopCh:      make(chan struct{}),
+		healCh:      make(chan struct{}, 1),
+		reconcileCh: make(chan struct{}, 1),
 	}
 	d.dyn.reset()
 	return d
@@ -66,6 +70,11 @@ func (d *Daemon) Run() error {
 	defer neteng.ReleaseLock(d.lockFile)
 
 	_ = d.net.CleanupOrphans()
+	if changed, err := networkd.EnsureDropIn(); err != nil {
+		log.Printf("networkd drop-in %s: %v", constants.NetworkdDropInPath, err)
+	} else if changed {
+		log.Printf("installed %s (systemd-networkd will keep ParsVPN's policy rules from its next start)", constants.NetworkdDropInPath)
+	}
 	// A crashed daemon may have left resolv.conf pointing at the dead proxy.
 	if err := dnseng.RecoverResolvConf(); err != nil {
 		log.Printf("restore resolv.conf: %v", err)
@@ -100,9 +109,11 @@ func (d *Daemon) Run() error {
 
 	go d.healthLoop()
 	go d.healLoop()
+	go d.reconcileLoop()
 	go d.updateLoop()
 	go d.restoreWanted()
 	d.startLinkWatch()
+	d.startRoutingWatch()
 	// Delay packet sampling until after restore so AF_PACKET bind cannot race bring-up.
 	go func() {
 		select {
@@ -716,6 +727,7 @@ func (d *Daemon) statusLocked() ipc.StatusPayload {
 	d.dyn.mu.Lock()
 	st.DynamicRoutes = len(d.dyn.seen)
 	d.dyn.mu.Unlock()
+	st.Routing = d.routingStatusLocked()
 	st.DNSOverride = d.active.OverrideSystemDNS
 	if len(d.active.DNS) > 0 {
 		st.DNSServers = append([]string(nil), d.active.DNS...)

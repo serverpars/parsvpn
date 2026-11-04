@@ -54,6 +54,7 @@ func (e *Engine) applyReturnPathRules() error {
 		if err := netlink.RuleAdd(rule); err != nil {
 			return fmt.Errorf("return-path fwmark rule (family %d): %w", family, err)
 		}
+		e.recordRule(rule)
 	}
 	return nil
 }

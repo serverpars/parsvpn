@@ -27,6 +27,7 @@ internal/
   preset/     custom bypass presets (/etc/parsvpn/presets/), entries = IP/CIDR/host/*.wildcard
   geo/        builtin presets; `ir` = embedded ir_ipv4.txt (~2k CIDRs)
   dnseng/     embedded DNS proxy on 127.0.0.199:53 + adapters (systemd-resolved, resolv.conf)
+  networkd/   systemd-networkd drop-in (ManageForeignRoutingPolicyRules=no), written at daemon start, removed on uninstall
   hostpin/    `host add`: resolve through tunnel DNS, pin domain→IP, route it, reload
   flowlog/    ring buffer + AF_PACKET sampler on pv-tun0 for `parsvpn traffic`
   update/     GitHub release check/apply, config.json (auto_update, auto_connect, interval)
@@ -53,6 +54,8 @@ internal/
 - **Isolation values** live only in [internal/constants/constants.go](internal/constants/constants.go) and are guarded by [isolation_test.go](internal/constants/isolation_test.go). Rule prefs: 13990 return path < 13991 endpoint < 13995 legacy < 14000–16998 destinations < 16999 catch-all. Don't hardcode these elsewhere (the `!linux` engine stub is the one exception).
 - **Linux/stub pairs**: `foo_linux.go` (`//go:build linux`) must have a matching `foo_stub.go` (`//go:build !linux`) with identical exported signatures, or the Windows build breaks.
 - **Locking in daemon**: methods suffixed `Locked` require `d.mu` held. Set `ignoreLinkDelete` around intentional teardown so the link watcher doesn't trigger auto-heal.
+- **Routing self-heal**: every rule/route the engine installs is recorded (`recordRule`/`recordRoute` in [routing_linux.go](internal/neteng/routing_linux.go); reset by Apply*/Teardown/CleanupOrphans). **A new install path must record what it adds, or it won't self-heal.** `Engine.Reconcile` only *adds* missing recorded entries (routes first, rules by ascending pref, catch-all held back if an earlier rule failed) and does nothing while pv-tun0 is missing/down (fail open). [daemon/routing.go](internal/daemon/routing.go) runs it on RTM_DELRULE/RTM_DELROUTE (`WatchRouting`, 300 ms debounce) and every `RoutingReconcileIntervalSec`; `repairGuard` pauses event-driven repairs during a repair storm. `parsvpn status` exits 2 when `Routing.Degraded()`. The engine's `rs.mu` is a leaf lock (after `d.mu` / `d.dyn.mu`).
+- **Netlink tests** (`TestNetns*`) need root + `PARSVPN_NETNS_TESTS=1` and run in a throwaway netns (`internal/netnstest`). They run in the coexist containers; on the Windows dev box, build with `GOOS=linux go test -c ./internal/neteng` and run the binary as root in WSL.
 - **Down vs shutdown**: `Down` (user action) clears `wanted_profile`; `shutdown` (signal/service restart/update) keeps it so the tunnel restores.
 - **Listen-port conflicts** (e.g. wg0 on 51820) are resolved centrally in `wg.Configure` → `neteng.ResolveListenPort`; port 0 means "keep current/ephemeral".
 - **External commands** (`nft`, `iptables`, `ipset`) must go through `runTimed` (timeout + process-group kill); iptables/nft xtables locks have deadlocked before.
@@ -65,7 +68,6 @@ internal/
 - **Presets**: a missing custom preset is tolerated on `Load`/`Normalize` (so the profile can still be switched away) and rejected on `Save`.
 - **Imports** drop `0.0.0.0/0` and `::/0` from AllowedIPs so imported profiles stay split-only; exclude mode forces AllowedIPs to `0.0.0.0/0` at configure time.
 - Profiles are `0600` JSON under `/etc/parsvpn/profiles/`; names must match `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`.
-- [tests/coexist/README.md](tests/coexist/README.md) still mentions old rule prefs 15190–15199; constants.go is authoritative.
 
 ## Versioning and release
 

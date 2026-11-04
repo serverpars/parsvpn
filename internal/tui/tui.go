@@ -1030,6 +1030,16 @@ func (m model) viewBrowse() string {
 		if m.status.DynamicRoutes > 0 {
 			detail.WriteString(kv("Wildcards", fmt.Sprintf("%d IPs routed", m.status.DynamicRoutes)))
 		}
+		if r := m.status.Routing; r != nil {
+			if why := r.Degraded(); why != "" {
+				detail.WriteString(kv("Routing", busyStyle.Render(why+" — traffic is bypassing the tunnel")))
+			} else {
+				detail.WriteString(kv("Routing", r.Summary()))
+			}
+			if r.Repairs > 0 {
+				detail.WriteString(kv("Repaired", fmt.Sprintf("%d× (last %s)", r.Repairs, r.LastRepair.Local().Format("Jan 2 15:04:05"))))
+			}
+		}
 		detail.WriteString("\n")
 	case len(m.list.Items()) == 0:
 		detail.WriteString(sectionHead.Render("Welcome") + "\n")

@@ -4,7 +4,7 @@ import "time"
 
 const (
 	AppName    = "parsvpn"
-	Version    = "2.0.2"
+	Version    = "2.0.3"
 	IfaceName  = "pv-tun0"
 	RouteTable = 51920
 	// FwMark marks conntrack entries for inbound connections that arrived on a
@@ -57,6 +57,11 @@ const (
 
 	DNSListenAddr = "127.0.0.199:53"
 
+	// NetworkdDropInPath keeps systemd-networkd (when installed) from deleting
+	// "foreign" policy rules — ours — when it starts. Defence in depth only;
+	// the daemon also re-installs missing rules itself.
+	NetworkdDropInPath = "/etc/systemd/networkd.conf.d/50-parsvpn.conf"
+
 	HandshakePollIntervalSec = 15
 	HandshakeStaleSec        = 120
 	// RekeyBackoffSec is the minimum gap after a (re)configure or stale-tunnel
@@ -65,6 +70,14 @@ const (
 	RekeyBackoffSec = 120
 	// ProbeTimeoutSec bounds each probe dial; targets are dialed in parallel.
 	ProbeTimeoutSec = 3
+	// RoutingReconcileIntervalSec is the backstop interval for re-installing
+	// ParsVPN rules/routes deleted by something else (systemd-networkd,
+	// `ip rule flush`). RTM_DELRULE/RTM_DELROUTE events trigger it sooner.
+	RoutingReconcileIntervalSec = 15
+	// RoutingRepairStormMax repairs within a minute means something keeps
+	// deleting our routing; event-driven repairs then pause until the next
+	// periodic pass so the daemon does not fight it in a tight loop.
+	RoutingRepairStormMax = 5
 	// DefaultPersistentKeepaliveSec applies when a peer leaves
 	// persistent_keepalive unset. Without it an idle tunnel stops handshaking
 	// and the health loop sees it as stale.

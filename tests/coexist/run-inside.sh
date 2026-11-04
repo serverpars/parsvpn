@@ -48,6 +48,43 @@ parsvpn up office
 UP_RC=$?
 set -e
 
+# Self-heal: rules deleted behind ParsVPN's back (systemd-networkd restart,
+# `ip rule del`) come back without a restart, exactly once, and status is
+# healthy again.
+if [[ "${UP_RC}" -eq 0 ]]; then
+  ours() { ip rule show | grep -c 'lookup 51920' || true; }
+  want="$(ours)"
+  for p in $(ip rule show | awk '/lookup 51920/ {sub(":","",$1); print $1}'); do
+    ip rule del pref "${p}"
+  done
+  for _ in $(seq 1 10); do
+    [[ "$(ours)" -eq "${want}" ]] && break
+    sleep 0.5
+  done
+  if [[ "$(ours)" -ne "${want}" ]]; then
+    echo "FAIL: deleted rules not restored ($(ours)/${want})" >&2
+    ip rule show >&2
+    exit 1
+  fi
+  if [[ -n "$(ip rule show | sort | uniq -d)" ]]; then
+    echo "FAIL: duplicate rules after repair" >&2
+    ip rule show >&2
+    exit 1
+  fi
+  if ! parsvpn status >/dev/null; then
+    echo "FAIL: status not healthy after repair" >&2
+    parsvpn status >&2 || true
+    exit 1
+  fi
+fi
+
+# Netlink tests in throwaway namespaces (built by run.sh into /dist).
+for t in /dist/neteng.test /dist/daemon.test; do
+  if [[ -x "${t}" ]]; then
+    PARSVPN_NETNS_TESTS=1 "${t}" -test.run Netns -test.count=1
+  fi
+done
+
 # Rival artifacts must survive
 case "${RIVAL}" in
   wg-quick)

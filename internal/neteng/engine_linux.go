@@ -18,6 +18,7 @@ import (
 type Engine struct {
 	Iface string
 	Table int
+	rs    routingState // what was installed, for Reconcile / RoutingHealth
 }
 
 func New() *Engine {
@@ -29,6 +30,7 @@ func New() *Engine {
 
 // CleanupOrphans removes residual ParsVPN networking left after a crash.
 func (e *Engine) CleanupOrphans() error {
+	e.resetDesired()
 	_ = e.flushRules()
 	_ = e.flushTable()
 	link, err := netlink.LinkByName(e.Iface)
@@ -86,6 +88,7 @@ func (e *Engine) AssignAddress(addressCIDR string, mtu int) error {
 
 // ApplySplitRoutes installs destination-based policy routing into table 51920 (include mode).
 func (e *Engine) ApplySplitRoutes(cidrs []string) error {
+	e.resetDesired()
 	if err := e.flushRules(); err != nil {
 		return err
 	}
@@ -111,6 +114,7 @@ func (e *Engine) ApplySplitRoutes(cidrs []string) error {
 		if err := netlink.RouteReplace(route); err != nil {
 			return fmt.Errorf("route %s: %w", cidr, err)
 		}
+		e.recordRoute(RouteSpec{Dst: canonCIDR(dst), Tunnel: true})
 		rule := netlink.NewRule()
 		rule.Family = familyOf(dst)
 		rule.Table = e.Table
@@ -119,6 +123,7 @@ func (e *Engine) ApplySplitRoutes(cidrs []string) error {
 		if err := netlink.RuleAdd(rule); err != nil {
 			return fmt.Errorf("rule to %s: %w", cidr, err)
 		}
+		e.recordRule(rule)
 		pref++
 		if pref > constants.RulePrefMax {
 			return fmt.Errorf("too many split CIDRs (max %d)", constants.RulePrefMax-constants.RulePrefMin+1)
@@ -134,6 +139,7 @@ func (e *Engine) ApplySplitRoutes(cidrs []string) error {
 // connections that arrived on a non-tunnel interface (SSH, CDN origin, reverse
 // proxy) leave via the main table instead of the tunnel.
 func (e *Engine) ApplyExcludeRoutes(bypass []string, endpointHost string) error {
+	e.resetDesired()
 	if err := e.flushRules(); err != nil {
 		return err
 	}
@@ -155,6 +161,7 @@ func (e *Engine) ApplyExcludeRoutes(bypass []string, endpointHost string) error 
 	}); err != nil {
 		return fmt.Errorf("default route table %d: %w", e.Table, err)
 	}
+	e.recordRoute(RouteSpec{Dst: canonCIDR(def4), Tunnel: true})
 
 	// Bypass destinations stay on main: endpoint + host /32s as ip rules
 	// (required for handshake/DNS), bulk nets via ipset/nft fwmark.
@@ -170,6 +177,7 @@ func (e *Engine) ApplyExcludeRoutes(bypass []string, endpointHost string) error 
 	if err := netlink.RuleAdd(catch); err != nil {
 		return fmt.Errorf("catch-all tunnel rule: %w", err)
 	}
+	e.recordRule(catch)
 
 	// Return-path: mark inbound !pv-tun0 connections and route their replies via main.
 	if err := e.applyReturnPath(); err != nil {
@@ -192,14 +200,16 @@ func (e *Engine) AddHostRoutes(ips []net.IP) error {
 		if v4 == nil {
 			continue
 		}
+		dst := &net.IPNet{IP: v4, Mask: net.CIDRMask(32, 32)}
 		if err := netlink.RouteReplace(&netlink.Route{
 			LinkIndex: link.Attrs().Index,
-			Dst:       &net.IPNet{IP: v4, Mask: net.CIDRMask(32, 32)},
+			Dst:       dst,
 			Table:     e.Table,
 			Scope:     netlink.SCOPE_LINK,
 		}); err != nil {
 			return fmt.Errorf("host route %s: %w", v4, err)
 		}
+		e.recordRoute(RouteSpec{Dst: canonCIDR(dst), Tunnel: true})
 	}
 	return nil
 }
@@ -208,10 +218,9 @@ func (e *Engine) AddHostRoutes(ips []net.IP) error {
 func (e *Engine) DelHostRoutes(ips []net.IP) {
 	for _, ip := range ips {
 		if v4 := ip.To4(); v4 != nil {
-			_ = netlink.RouteDel(&netlink.Route{
-				Dst:   &net.IPNet{IP: v4, Mask: net.CIDRMask(32, 32)},
-				Table: e.Table,
-			})
+			dst := &net.IPNet{IP: v4, Mask: net.CIDRMask(32, 32)}
+			e.forgetRoute(canonCIDR(dst))
+			_ = netlink.RouteDel(&netlink.Route{Dst: dst, Table: e.Table})
 		}
 	}
 }
@@ -228,11 +237,13 @@ func (e *Engine) EnsureTableLookupRule() error {
 	if err := netlink.RuleAdd(rule); err != nil && !errors.Is(err, unix.EEXIST) {
 		return fmt.Errorf("table lookup rule: %w", err)
 	}
+	e.recordRule(rule)
 	return nil
 }
 
 // Teardown removes interface, rules, and table routes.
 func (e *Engine) Teardown() error {
+	e.resetDesired()
 	_ = e.flushRules()
 	_ = e.flushTable()
 	link, err := netlink.LinkByName(e.Iface)

@@ -29,8 +29,39 @@ var (
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
+		var ec exitCodeError
+		if errors.As(err, &ec) {
+			os.Exit(ec.code)
+		}
 		os.Exit(1)
 	}
+}
+
+// exitCodeError ends the process with code; the command has already printed
+// what the user needs, so cobra prints neither the error nor usage.
+type exitCodeError struct {
+	code int
+	msg  string
+}
+
+func (e exitCodeError) Error() string { return e.msg }
+
+// exitDegraded is `parsvpn status`'s exit code when the tunnel is up but
+// traffic is not using it (e.g. policy rules deleted by another tool).
+const exitDegraded = 2
+
+// statusDegraded returns why an active session is unhealthy, or "".
+func statusDegraded(st *ipc.StatusPayload) string {
+	if st == nil || !st.Active || st.Healing {
+		return ""
+	}
+	return st.Routing.Degraded()
+}
+
+func degradedExit(cmd *cobra.Command, reason string) error {
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	return exitCodeError{code: exitDegraded, msg: reason}
 }
 
 func newRootCmd() *cobra.Command {
@@ -129,6 +160,12 @@ func cmdStatus() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "status",
 		Short: "Show tunnel status",
+		Long: `Show tunnel status, including whether ParsVPN's policy rules and table
+routes are all installed.
+
+Exit status: 0 healthy or inactive, 1 error (e.g. daemon unreachable),
+2 active but degraded (routing rules or routes missing, so traffic is not
+using the tunnel).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resp, err := ipc.Call(ipc.Request{Cmd: "status"})
 			if err != nil {
@@ -137,10 +174,17 @@ func cmdStatus() *cobra.Command {
 			if !resp.OK {
 				return fmt.Errorf("%s", resp.Error)
 			}
+			degraded := statusDegraded(resp.Status)
 			if asJSON {
 				enc := json.NewEncoder(os.Stdout)
 				enc.SetIndent("", "  ")
-				return enc.Encode(resp.Status)
+				if err := enc.Encode(resp.Status); err != nil {
+					return err
+				}
+				if degraded != "" {
+					return degradedExit(cmd, degraded)
+				}
+				return nil
 			}
 			st := resp.Status
 			if st.Healing {
@@ -163,6 +207,18 @@ func cmdStatus() *cobra.Command {
 			if st.DynamicRoutes > 0 {
 				fmt.Printf("wildcard routes: %d IPs\n", st.DynamicRoutes)
 			}
+			if st.Routing != nil {
+				fmt.Printf("routing: %s\n", st.Routing.Summary())
+				if st.Routing.Repairs > 0 {
+					fmt.Printf("repairs: %d (last %s UTC: %s)\n", st.Routing.Repairs,
+						st.Routing.LastRepair.UTC().Format("2006-01-02 15:04:05"), st.Routing.LastRepairNote)
+				}
+			}
+			if degraded != "" {
+				fmt.Printf("health: degraded — %s\n", degraded)
+				return degradedExit(cmd, degraded)
+			}
+			fmt.Println("health: ok")
 			return nil
 		},
 	}
