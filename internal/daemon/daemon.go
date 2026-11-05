@@ -770,39 +770,70 @@ func (d *Daemon) healthLoop() {
 			if err != nil {
 				continue
 			}
-			now := time.Now()
-			if !h.stale(p, now, rx, hs) {
+			v := h.check(p, time.Now(), rx, hs, func() probeResult {
+				targets := probeTargets(p)
+				res := probeResult{ran: len(targets) > 0, reachable: probeTunnel(targets)}
+				if _, _, fresh, err := ctrl.Stats(); err == nil {
+					res.handshake = fresh
+				}
+				return res
+			})
+			if v.action == healthQuiet {
 				continue
 			}
-			if hs.IsZero() {
-				log.Printf("no handshake within %ds — probing / rekey", constants.RekeyBackoffSec)
-			} else {
-				log.Printf("handshake stale (%s) — probing / rekey", now.Sub(hs).Round(time.Second))
-			}
-			if !probeTunnel(p) {
+			log.Print(v.reason)
+			if v.action == healthDead {
 				d.mu.Lock()
 				// Skip if Up/Reload swapped the session while we probed.
 				if d.active == p && d.wg == ctrl {
-					_ = ctrl.Rekey(p)
+					if err := ctrl.Rekey(p); err != nil {
+						log.Printf("re-apply peer config: %v", err)
+					}
 				}
 				d.mu.Unlock()
 			}
-			h.acted(now)
 		}
 	}
 }
 
-// healthState decides when the health loop treats the tunnel as dead.
-type healthState struct {
-	session *profile.Profile // d.active when the state was last reset
-	since   time.Time        // session start or last probe/rekey
-	lastRx  int64
+// healthAction is what one health pass asks the loop to do.
+type healthAction int
+
+const (
+	healthQuiet     healthAction = iota // nothing to report
+	healthRecovered                     // a failing tunnel works again
+	healthDead                          // warn and re-apply the peer config
+)
+
+// healthVerdict is the outcome of one health pass; reason is the log line.
+type healthVerdict struct {
+	action healthAction
+	reason string
 }
 
-// stale reports whether the tunnel looks dead: received bytes aren't rising,
+// probeResult is what a probe of a suspect tunnel found.
+type probeResult struct {
+	ran       bool      // false when the profile has no pinned IP to dial
+	reachable bool      // a pinned host answered
+	handshake time.Time // latest handshake, read after the probe
+}
+
+// healthState decides when the health loop treats the tunnel as dead.
+type healthState struct {
+	session      *profile.Profile // d.active when the state was last reset
+	since        time.Time        // session start or last probe/rekey
+	lastRx       int64
+	failingSince time.Time // when the tunnel was declared dead; zero if it isn't
+}
+
+// stale reports whether the tunnel needs checking: received bytes aren't rising,
 // the last probe/rekey (or Up/Reload) is at least RekeyBackoffSec ago, and the
 // handshake is older than HandshakeStaleSec or still missing after that window.
+// A tunnel already declared dead is re-checked after every backoff window,
+// whatever its counters say, until something proves it recovered.
 // Up/Reload install a new session profile, which restarts the backoff window.
+//
+// Stale is only a suspicion: see check.
 func (h *healthState) stale(p *profile.Profile, now time.Time, rx int64, handshake time.Time) bool {
 	if p != h.session {
 		*h = healthState{session: p, since: now, lastRx: rx}
@@ -810,10 +841,78 @@ func (h *healthState) stale(p *profile.Profile, now time.Time, rx int64, handsha
 	}
 	rising := rx > h.lastRx
 	h.lastRx = rx
-	if rising || now.Sub(h.since) < time.Duration(constants.RekeyBackoffSec)*time.Second {
+	if now.Sub(h.since) < time.Duration(constants.RekeyBackoffSec)*time.Second {
+		return false
+	}
+	if !h.failingSince.IsZero() {
+		return true
+	}
+	if rising {
 		return false
 	}
 	return handshake.IsZero() || now.Sub(handshake) > time.Duration(constants.HandshakeStaleSec)*time.Second
+}
+
+// check runs one health pass. An old handshake alone proves nothing: WireGuard
+// rekeys lazily on the next send after WGRekeyAfterSec, so a healthy idle tunnel
+// passes HandshakeStaleSec on every cycle. The tunnel is declared dead only if
+// no pinned host answers, or the handshake is past handshakeDeadAfter.
+//
+// probe runs only on a stale tunnel, and the handshake it reports wins: the
+// probe's own packets can complete a handshake.
+func (h *healthState) check(p *profile.Profile, now time.Time, rx int64, handshake time.Time, probe func() probeResult) healthVerdict {
+	if !h.stale(p, now, rx, handshake) {
+		return healthVerdict{}
+	}
+	res := probe()
+	if res.handshake.After(handshake) {
+		handshake = res.handshake
+	}
+	age := now.Sub(handshake).Round(time.Second)
+	limit := handshakeDeadAfter(p)
+	expired := age > limit
+
+	var reason string
+	switch {
+	case handshake.IsZero():
+		reason = fmt.Sprintf("no handshake within %ds — re-applying peer config", constants.RekeyBackoffSec)
+	case res.ran && !res.reachable:
+		reason = fmt.Sprintf("handshake stale (%s): no pinned host answered on 443 — re-applying peer config", age)
+	case res.ran && expired:
+		// Traffic through the tunnel would have forced a new handshake, so
+		// this answer came by another route.
+		reason = fmt.Sprintf("handshake stale (%s, limit %s): a pinned host answered outside the tunnel — re-applying peer config", age, limit)
+	case expired:
+		reason = fmt.Sprintf("handshake stale (%s, limit %s) — re-applying peer config", age, limit)
+	}
+
+	if res.ran || reason != "" {
+		h.acted(now)
+	}
+	if reason != "" {
+		if h.failingSince.IsZero() {
+			h.failingSince = now
+		}
+		return healthVerdict{healthDead, reason}
+	}
+	if h.failingSince.IsZero() {
+		return healthVerdict{}
+	}
+	down := now.Sub(h.failingSince).Round(time.Second)
+	h.failingSince = time.Time{}
+	return healthVerdict{healthRecovered, fmt.Sprintf("tunnel recovered after %s", down)}
+}
+
+// handshakeDeadAfter is the handshake age no healthy session reaches. A side
+// that didn't initiate the current session keeps its keys until
+// WGRejectAfterSec and only starts a handshake on its next send, up to one
+// keepalive later, so the limit sits past both.
+func handshakeDeadAfter(p *profile.Profile) time.Duration {
+	keepalive := 0
+	for _, peer := range p.Peers {
+		keepalive = max(keepalive, peer.EffectiveKeepalive())
+	}
+	return time.Duration(constants.WGRejectAfterSec+keepalive+constants.HandshakeDeadMarginSec) * time.Second
 }
 
 // acted starts a new backoff window after a probe or rekey.
@@ -1020,11 +1119,9 @@ func firstDNS(p *profile.Profile) string {
 // maxProbeTargets caps the parallel dials of one probe.
 const maxProbeTargets = 8
 
-// probeTunnel reports whether any pinned host answers TCP 443 through the
-// tunnel. Port 53 is not probed: edges commonly drop it silently. Each target
-// gets its own timeout and all are dialed in parallel, so one black-holed IP
-// can't starve the rest.
-func probeTunnel(p *profile.Profile) bool {
+// probeTargets lists the pinned IPs to dial on TCP 443. Port 53 is not probed:
+// edges commonly drop it silently.
+func probeTargets(p *profile.Profile) []string {
 	var targets []string
 	seen := map[string]bool{}
 	for _, o := range p.SplitTunnel.HostOverrides {
@@ -1039,6 +1136,12 @@ func probeTunnel(p *profile.Profile) bool {
 			break
 		}
 	}
+	return targets
+}
+
+// probeTunnel reports whether any target answers. Each gets its own timeout and
+// all are dialed in parallel, so one black-holed IP can't starve the rest.
+func probeTunnel(targets []string) bool {
 	timeout := time.Duration(constants.ProbeTimeoutSec) * time.Second
 	ok := make(chan bool, len(targets))
 	for _, addr := range targets {

@@ -4,7 +4,7 @@ import "time"
 
 const (
 	AppName    = "parsvpn"
-	Version    = "2.0.3"
+	Version    = "2.0.4"
 	IfaceName  = "pv-tun0"
 	RouteTable = 51920
 	// FwMark marks conntrack entries for inbound connections that arrived on a
@@ -62,8 +62,21 @@ const (
 	// the daemon also re-installs missing rules itself.
 	NetworkdDropInPath = "/etc/systemd/networkd.conf.d/50-parsvpn.conf"
 
+	// WireGuard protocol timers (REKEY_AFTER_TIME, REJECT_AFTER_TIME,
+	// REKEY_TIMEOUT). They are fixed by the protocol, not tunable.
+	WGRekeyAfterSec   = 120
+	WGRejectAfterSec  = 180
+	WGRekeyTimeoutSec = 5
+
 	HandshakePollIntervalSec = 15
-	HandshakeStaleSec        = 120
+	// HandshakeStaleSec is the handshake age at which the health loop starts to
+	// check the tunnel. Rekeying is lazy, so a healthy idle tunnel passes this
+	// on every cycle: on its own it is a reason to probe, not to warn.
+	HandshakeStaleSec = WGRekeyAfterSec
+	// HandshakeDeadMarginSec is added to the longest age a healthy session can
+	// reach (WGRejectAfterSec plus one keepalive). It covers two lost handshake
+	// initiations and the reply.
+	HandshakeDeadMarginSec = 3 * WGRekeyTimeoutSec
 	// RekeyBackoffSec is the minimum gap after a (re)configure or stale-tunnel
 	// probe/rekey before the health loop acts again; a zero handshake inside it
 	// is a handshake still in progress, not a dead tunnel.
