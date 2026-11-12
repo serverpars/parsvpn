@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/serverpars/parsvpn/internal/constants"
@@ -19,6 +20,9 @@ type Engine struct {
 	Iface string
 	Table int
 	rs    routingState // what was installed, for Reconcile / RoutingHealth
+	// looseRP is set while exclude mode needs loose reverse-path filtering,
+	// so Reconcile re-asserts it.
+	looseRP atomic.Bool
 }
 
 func New() *Engine {
@@ -31,6 +35,7 @@ func New() *Engine {
 // CleanupOrphans removes residual ParsVPN networking left after a crash.
 func (e *Engine) CleanupOrphans() error {
 	e.resetDesired()
+	e.restoreRPFilter()
 	_ = e.flushRules()
 	_ = e.flushTable()
 	link, err := netlink.LinkByName(e.Iface)
@@ -89,6 +94,7 @@ func (e *Engine) AssignAddress(addressCIDR string, mtu int) error {
 // ApplySplitRoutes installs destination-based policy routing into table 51920 (include mode).
 func (e *Engine) ApplySplitRoutes(cidrs []string) error {
 	e.resetDesired()
+	e.restoreRPFilter() // include mode keeps the host's own setting
 	if err := e.flushRules(); err != nil {
 		return err
 	}
@@ -244,6 +250,7 @@ func (e *Engine) EnsureTableLookupRule() error {
 // Teardown removes interface, rules, and table routes.
 func (e *Engine) Teardown() error {
 	e.resetDesired()
+	e.restoreRPFilter()
 	_ = e.flushRules()
 	_ = e.flushTable()
 	link, err := netlink.LinkByName(e.Iface)

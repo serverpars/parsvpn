@@ -166,6 +166,11 @@ func (e *Engine) Reconcile() (RepairResult, error) {
 		res.Skipped = "interface down"
 		return res, nil
 	}
+	if e.looseRP.Load() {
+		if err := e.ensureLooseRPFilter(); err != nil {
+			log.Printf("reconcile: %v", err)
+		}
+	}
 	haveRules, err := listRuleSpecs(e.rs.rules)
 	if err != nil {
 		return res, err

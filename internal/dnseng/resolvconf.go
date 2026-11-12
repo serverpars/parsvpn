@@ -2,6 +2,7 @@ package dnseng
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"strings"
@@ -12,6 +13,7 @@ import (
 const (
 	resolvConfPath      = "/etc/resolv.conf"
 	resolvManagedHeader = "# Managed by parsvpn — do not edit while tunnel is up\n"
+	resolvRebuiltHeader = "# Rebuilt by parsvpn: the original resolv.conf was lost while the tunnel was up\n"
 )
 
 // ResolvConfAdapter rewrites /etc/resolv.conf for Alma/CentOS-style hosts
@@ -48,17 +50,23 @@ func (a *ResolvConfAdapter) Apply(opts ApplyOpts) error {
 		if bak, _, err := readResolvBackup(); err == nil {
 			orig = bak
 			a.backedUp = true
+		} else if rebuilt := reconstructResolvConf(orig, opts.Fallback); rebuilt != nil {
+			// The backup is gone too (older builds kept it on tmpfs). Without
+			// one, every later Restore would leave the dead proxy in place.
+			if err := saveResolvBackup(rebuilt); err != nil {
+				return err
+			}
+			log.Printf("resolv.conf backup was lost; saved a rebuilt one (%s) to restore on disconnect",
+				strings.Join(parseNameservers(rebuilt), ", "))
+			orig = rebuilt
+			a.backedUp = true
 		} else {
 			orig = nil
 		}
 	} else {
-		if err := os.MkdirAll(constants.ConfigDir, 0o700); err != nil {
-			return fmt.Errorf("backup resolv.conf: %w", err)
+		if err := saveResolvBackup(orig); err != nil {
+			return err
 		}
-		if err := os.WriteFile(constants.ResolvBak, orig, 0o600); err != nil {
-			return fmt.Errorf("backup resolv.conf: %w", err)
-		}
-		_ = os.Remove(constants.LegacyResolvBak)
 		a.backedUp = true
 	}
 
@@ -88,6 +96,46 @@ func (a *ResolvConfAdapter) Apply(opts ApplyOpts) error {
 		b.WriteByte('\n')
 	}
 	return os.WriteFile(resolvConfPath, []byte(b.String()), 0o644)
+}
+
+func saveResolvBackup(data []byte) error {
+	if err := os.MkdirAll(constants.ConfigDir, 0o700); err != nil {
+		return fmt.Errorf("backup resolv.conf: %w", err)
+	}
+	if err := os.WriteFile(constants.ResolvBak, data, 0o600); err != nil {
+		return fmt.Errorf("backup resolv.conf: %w", err)
+	}
+	_ = os.Remove(constants.LegacyResolvBak)
+	return nil
+}
+
+// reconstructResolvConf builds a stand-in original from a managed resolv.conf
+// whose backup is gone: its own lines minus our header and proxy (pins-only
+// mode keeps the host's servers there), or, when no usable nameserver is
+// left, the fallback servers. Nil when there is nothing to build from.
+func reconstructResolvConf(managed []byte, fallback []string) []byte {
+	var b strings.Builder
+	b.WriteString(resolvRebuiltHeader)
+	for _, line := range strings.Split(string(managed), "\n") {
+		trim := strings.TrimSpace(line)
+		if trim == "" || strings.HasPrefix(trim, "#") || strings.HasPrefix(trim, "nameserver 127.0.0.199") {
+			continue
+		}
+		b.WriteString(trim)
+		b.WriteByte('\n')
+	}
+	if len(parseNameservers([]byte(b.String()))) == 0 {
+		for _, s := range fallback {
+			if ip := net.ParseIP(s); ip != nil {
+				b.WriteString("nameserver " + ip.String() + "\n")
+			}
+		}
+	}
+	out := []byte(b.String())
+	if len(parseNameservers(out)) == 0 {
+		return nil
+	}
+	return out
 }
 
 // resolvedUpstreamConf lists systemd-resolved's real upstream servers.
@@ -138,6 +186,17 @@ func parseNameservers(data []byte) []string {
 
 func (a *ResolvConfAdapter) Restore() error {
 	data, path, err := readResolvBackup()
+	if err != nil && os.IsNotExist(err) {
+		// No backup, but our file is still in place: never leave the system
+		// pointing at a proxy that is about to stop.
+		if cur, rerr := os.ReadFile(resolvConfPath); rerr == nil && isManagedResolvConf(cur) {
+			if rebuilt := reconstructResolvConf(cur, nil); rebuilt != nil {
+				a.backedUp = false
+				return os.WriteFile(resolvConfPath, rebuilt, 0o644)
+			}
+			log.Printf("resolv.conf still points at the ParsVPN proxy and its backup is lost; set real nameservers in %s", resolvConfPath)
+		}
+	}
 	if err != nil {
 		if !a.backedUp || os.IsNotExist(err) {
 			a.backedUp = false

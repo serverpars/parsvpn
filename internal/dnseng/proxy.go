@@ -21,6 +21,9 @@ type ApplyOpts struct {
 	Domains []string
 	// CatchAll makes the proxy the system default resolver (all queries).
 	CatchAll bool
+	// Fallback resolvers stand in for the host's own when its original
+	// resolv.conf was lost (see reconstructResolvConf).
+	Fallback []string
 }
 
 // Proxy is an embedded DNS resolver on 127.0.0.199:53.
@@ -127,7 +130,11 @@ func (p *Proxy) Start() error {
 
 	domains := routingDomains(p.overrides)
 	if p.adapter != nil && (p.catchAll || len(domains) > 0) {
-		if err := p.adapter.Apply(ApplyOpts{Domains: domains, CatchAll: p.catchAll}); err != nil {
+		var fallback []string
+		if host, _, err := net.SplitHostPort(p.tunnel); err == nil && host != "" {
+			fallback = []string{host}
+		}
+		if err := p.adapter.Apply(ApplyOpts{Domains: domains, CatchAll: p.catchAll, Fallback: fallback}); err != nil {
 			_ = p.Stop()
 			return err
 		}

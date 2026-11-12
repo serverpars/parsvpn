@@ -4,7 +4,7 @@ import "time"
 
 const (
 	AppName    = "parsvpn"
-	Version    = "2.0.4"
+	Version    = "2.0.5"
 	IfaceName  = "pv-tun0"
 	RouteTable = 51920
 	// FwMark marks conntrack entries for inbound connections that arrived on a
@@ -48,6 +48,9 @@ const (
 	SocketPath       = "/var/run/parsvpn/daemon.sock"
 	LockPath         = "/var/run/parsvpn/daemon.lock"
 	StatePath        = "/var/run/parsvpn/state.json"
+	// RPFilterOrigPath holds net.ipv4.conf.all.rp_filter as it was before
+	// exclude mode loosened it. tmpfs on purpose: the sysctl resets on reboot too.
+	RPFilterOrigPath = "/var/run/parsvpn/rp_filter.orig"
 	// ResolvBak holds the pre-tunnel /etc/resolv.conf. It lives on persistent
 	// storage so the original survives a crash or power loss while the managed
 	// resolv.conf (which also persists) is still in place.

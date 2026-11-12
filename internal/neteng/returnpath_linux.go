@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,7 +36,14 @@ func returnPathBackendPath() string {
 // applyReturnPath installs conntrack/fwmark policy so replies to inbound
 // connections that arrived on a non-tunnel interface stay on the main table.
 // Without this, exclude-mode catch-all sends replies into the tunnel (CDN/SSH break).
+//
+// Strict rp_filter would drop those inbound packets before they get here, so
+// it is loosened too. A failure there is logged, not fatal: outbound traffic
+// still works and the tunnel should not fail to come up over it.
 func (e *Engine) applyReturnPath() error {
+	if err := e.ensureLooseRPFilter(); err != nil {
+		log.Printf("return path: %v", err)
+	}
 	if err := e.applyReturnPathMarks(); err != nil {
 		return err
 	}
