@@ -127,8 +127,21 @@ func assetName() string {
 }
 
 // Apply downloads rel, verifies checksum when present, replaces the installed
-// binary, and restarts the systemd unit. Requires root.
+// binary, and restarts the systemd unit, waiting for the new daemon's socket.
+// Requires root. The daemon itself must use ApplyUnattended instead.
 func Apply(ctx context.Context, rel *Release) error {
+	return apply(ctx, rel, restartService)
+}
+
+// ApplyUnattended is Apply for the daemon updating itself: the restart is
+// only queued (systemctl --no-block), because systemd stops this very process
+// as part of it. Waiting for the job made the daemon's own SIGTERM reach the
+// systemctl child, so every successful update was logged as a failure.
+func ApplyUnattended(ctx context.Context, rel *Release) error {
+	return apply(ctx, rel, queueServiceRestart)
+}
+
+func apply(ctx context.Context, rel *Release, restart func() error) error {
 	if rel == nil {
 		return fmt.Errorf("nil release")
 	}
@@ -157,7 +170,7 @@ func Apply(ctx context.Context, rel *Release) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("install binary: %w (try running as root)", err)
 	}
-	if err := restartService(); err != nil {
+	if err := restart(); err != nil {
 		return fmt.Errorf("binary updated to %s but service restart failed: %w", FormatVersion(rel.Version), err)
 	}
 	return nil
@@ -256,6 +269,19 @@ func restartService() error {
 	}
 	if err := waitForUnixSocket(constants.SocketPath, 15*time.Second, constants.ServiceName); err != nil {
 		return err
+	}
+	return nil
+}
+
+// queueServiceRestart asks systemd to restart the unit and returns once the
+// job is queued, without waiting for it.
+func queueServiceRestart() error {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return nil
+	}
+	out, err := exec.Command("systemctl", "restart", "--no-block", constants.ServiceName).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

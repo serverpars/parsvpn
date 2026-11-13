@@ -4,7 +4,7 @@ import "time"
 
 const (
 	AppName    = "parsvpn"
-	Version    = "2.0.5"
+	Version    = "2.0.6"
 	IfaceName  = "pv-tun0"
 	RouteTable = 51920
 	// FwMark marks conntrack entries for inbound connections that arrived on a

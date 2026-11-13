@@ -620,6 +620,11 @@ func (d *Daemon) Down() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	_ = clearWanted()
+	if d.active != nil {
+		log.Printf("down profile=%s (requested; auto-connect cleared, it will not reconnect after a restart or reboot)", d.active.Name)
+	} else {
+		log.Printf("down requested while inactive (auto-connect cleared)")
+	}
 	return d.downLocked()
 }
 
@@ -1091,11 +1096,11 @@ func (d *Daemon) maybeAutoUpdate() {
 		return
 	}
 	log.Printf("autopilot: new release %s available — installing unattended", update.FormatVersion(rel.Version))
-	if err := update.Apply(ctx, rel); err != nil {
+	if err := update.ApplyUnattended(ctx, rel); err != nil {
 		log.Printf("autopilot update failed: %v", err)
 		return
 	}
-	log.Printf("autopilot update applied %s — restarting service", update.FormatVersion(rel.Version))
+	log.Printf("autopilot update installed %s — restarting service (the tunnel comes back if it was connected)", update.FormatVersion(rel.Version))
 }
 
 func (d *Daemon) persistState() error {
